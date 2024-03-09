@@ -2615,6 +2615,9 @@ int main(int argc, char ** argv) {
     gpt_params    params;
     server_params sparams;
 
+    llama_backend_init();
+    llama_numa_init(params.numa);
+
     // struct that contains llama context and inference
     server_context ctx_server;
 
@@ -2628,8 +2631,6 @@ int main(int argc, char ** argv) {
         params.model_alias = params.model;
     }
 
-    llama_backend_init();
-    llama_numa_init(params.numa);
 
     LOG_INFO("build info", {
         {"build",  LLAMA_BUILD_NUMBER},
