@@ -72,6 +72,11 @@ struct server_task {
 
     bool infill    = false;
     bool embedding = false;
+
+    //jinyu: add attribute
+    struct ggml_tensor* trans_tensor;
+    int s_layer;
+    int e_layer;
 };
 
 struct server_task_result {
@@ -126,6 +131,11 @@ struct server_slot {
     int id;
     int id_task = -1;
     int id_multi = -1;
+
+    //jinyu: add ggml tensor
+    struct ggml_tensor* trans_tensor;
+    int s_layer;
+    int e_layer;
 
     struct slot_params params;
 
@@ -205,6 +215,11 @@ struct server_slot {
         n_past_se          = 0;
 
         generated_token_probs.clear();
+    }
+
+    //jinyu: set the transfer feature of slot
+    void set_transfer_feature(ggml_tensor* trans_tensor) {
+        this->trans_tensor = trans_tensor;
     }
 
     bool has_budget(gpt_params &global_params) {
@@ -1350,6 +1365,14 @@ struct server_context {
         task.embedding = embedding;
         task.type      = SERVER_TASK_TYPE_COMPLETION;
 
+        // jinyu: add data (receive feature, start and end from master.cpp)
+        struct ggml_tensor* trans_tensor = {};
+        int s_layer = 0;
+        int e_layer = 10;
+        task.trans_tensor = trans_tensor;
+        task.s_layer = s_layer;
+        task.e_layer = e_layer;
+
         // when a completion task's prompt array is not a singleton, we split it into multiple requests
         // otherwise, it's a single-prompt task, we actually queue it
         // if there's numbers in the prompt array it will be treated as an array of tokens
@@ -1438,6 +1461,11 @@ struct server_context {
                     slot->id_multi  = task.id_multi;
                     slot->infill    = task.infill;
                     slot->embedding = task.embedding;
+
+                    // jinyu: add inp_tensor
+                    slot->trans_tensor = task.trans_tensor;
+                    slot->s_layer = task.s_layer;
+                    slot->e_layer = task.e_layer;
 
                     if (!launch_slot_with_data(*slot, task.data)) {
                         // send error result
@@ -1984,74 +2012,96 @@ struct server_context {
                 0, 0, 0, // unused
             };
 
+            //jinyu: set the start_layer and end_layer into ctx
+            //jinyu TODO: need to classify the first node and other node because of batching!!! NEED TO MODIFY for batching
+            int s_layer,e_layer;
+            struct ggml_tensor* trans_tensor;
+            for (auto& slot : slots) {
+                s_layer = slot.s_layer;
+                e_layer = slot.e_layer;
+                trans_tensor = slot.trans_tensor;
+                break;
+            }
+            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
+
             const int ret = llama_decode(ctx, batch_view);
 
-            if (ret != 0) {
-                if (n_batch == 1 || ret < 0) {
-                    // if you get here, it means the KV cache is full - try increasing it via the context size
-                    LOG_TEE("%s : failed to decode the batch, n_batch = %d, ret = %d\n", __func__, n_batch, ret);
-                    return false;
-                }
-
-                LOG_TEE("%s : failed to find free space in the KV cache, retrying with smaller n_batch = %d\n", __func__, n_batch / 2);
-
-                // retry with half the batch size to try to find a free slot in the KV cache
-                n_batch /= 2;
-                i -= n_batch;
-
-                continue;
+            // jinyu: set the transfer feature to slots and send the feature
+            for (auto& slot : slots) {
+                slot.set_transfer_feature(get_transfer_feature(ctx));
+                //send_feature_res(slot);
             }
 
-            for (auto & slot : slots) {
-                if (slot.state != SLOT_STATE_PROCESSING || slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
+            const int64_t n_layer = get_transfer_nlayer(ctx);
+            if(true){
+                if (ret != 0) {
+                    if (n_batch == 1 || ret < 0) {
+                        // if you get here, it means the KV cache is full - try increasing it via the context size
+                        LOG_TEE("%s : failed to decode the batch, n_batch = %d, ret = %d\n", __func__, n_batch, ret);
+                        return false;
+                    }
+
+                    LOG_TEE("%s : failed to find free space in the KV cache, retrying with smaller n_batch = %d\n", __func__, n_batch / 2);
+
+                    // retry with half the batch size to try to find a free slot in the KV cache
+                    n_batch /= 2;
+                    i -= n_batch;
+
                     continue;
                 }
 
-                // prompt evaluated for embedding
-                if (slot.embedding) {
-                    send_embedding(slot, batch_view);
-                    slot.release();
+                for (auto & slot : slots) {
+                    if (slot.state != SLOT_STATE_PROCESSING || slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
+                        continue;
+                    }
+
+                    // prompt evaluated for embedding
+                    if (slot.embedding) {
+                        send_embedding(slot, batch_view);
+                        slot.release();
+                        slot.i_batch = -1;
+                        continue;
+                    }
+
+                    completion_token_output result;
+                    const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
+
+                    llama_sampling_accept(slot.ctx_sampling, ctx, id, true);
+
+                    slot.n_decoded += 1;
+                    if (slot.n_decoded == 1) {
+                        slot.t_start_generation = ggml_time_us();
+                        slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
+                        metrics.on_prompt_eval(slot);
+                    }
+
+                    llama_token_data_array cur_p = { slot.ctx_sampling->cur.data(), slot.ctx_sampling->cur.size(), false };
+                    result.tok = id;
+
+                    const int32_t n_probs = slot.sparams.n_probs;
+                    if (slot.sparams.temp <= 0 && n_probs > 0) {
+                        // for llama_sample_token_greedy we need to sort candidates
+                        llama_sample_softmax(ctx, &cur_p);
+                    }
+
+                    for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
+                        result.probs.push_back({
+                            cur_p.data[i].id,
+                            cur_p.data[i].p
+                        });
+                    }
+
+                    if (!process_token(result, slot)) {
+                        slot.release();
+                        slot.print_timings();
+                        send_final_response(slot);
+                        metrics.on_prediction(slot);
+                    }
+
                     slot.i_batch = -1;
-                    continue;
                 }
-
-                completion_token_output result;
-                const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
-
-                llama_sampling_accept(slot.ctx_sampling, ctx, id, true);
-
-                slot.n_decoded += 1;
-                if (slot.n_decoded == 1) {
-                    slot.t_start_generation = ggml_time_us();
-                    slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
-                    metrics.on_prompt_eval(slot);
-                }
-
-                llama_token_data_array cur_p = { slot.ctx_sampling->cur.data(), slot.ctx_sampling->cur.size(), false };
-                result.tok = id;
-
-                const int32_t n_probs = slot.sparams.n_probs;
-                if (slot.sparams.temp <= 0 && n_probs > 0) {
-                    // for llama_sample_token_greedy we need to sort candidates
-                    llama_sample_softmax(ctx, &cur_p);
-                }
-
-                for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
-                    result.probs.push_back({
-                        cur_p.data[i].id,
-                        cur_p.data[i].p
-                    });
-                }
-
-                if (!process_token(result, slot)) {
-                    slot.release();
-                    slot.print_timings();
-                    send_final_response(slot);
-                    metrics.on_prediction(slot);
-                }
-
-                slot.i_batch = -1;
             }
+            
         }
 
         LOG_VERBOSE("slots updated", {});
