@@ -2044,6 +2044,11 @@ struct llama_context {
 
     bool has_evaluated_once = false;
 
+    // jinyu
+    int s_layer=-1;
+    int e_layer=-1;
+    struct ggml_tensor* trans_tensor;
+
     int64_t t_start_us;
     int64_t t_load_us;
     int64_t t_sample_us = 0;
@@ -13041,6 +13046,23 @@ uint32_t llama_n_ctx(const struct llama_context * ctx) {
 
 uint32_t llama_n_batch(const struct llama_context * ctx) {
     return ctx->cparams.n_batch;
+}
+
+// jinyu
+void llama_set_s_e_inference(struct llama_context * ctx, int s_layer, int e_layer, struct ggml_tensor* trans_tensor) {
+    ctx->s_layer = s_layer;
+    ctx->e_layer = e_layer;
+    ctx->trans_tensor = trans_tensor;
+}
+struct ggml_tensor* get_transfer_feature(struct llama_context* ctx) {
+    return ctx->trans_tensor;
+}
+int64_t get_transfer_nlayer(struct llama_context* ctx) {
+    return ctx->model.hparams.n_layer;
+}
+
+enum llama_vocab_type llama_vocab_type(const struct llama_model * model) {
+    return model->vocab.type;
 }
 
 uint32_t llama_n_max_seq(const struct llama_context * ctx) {

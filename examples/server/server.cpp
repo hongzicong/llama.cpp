@@ -87,6 +87,9 @@ struct server_task_result {
 
     bool stop;
     bool error;
+
+    //jinyu
+    struct ggml_tensor* trans_tensor=nullptr;
 };
 
 struct server_task_multi {
@@ -136,6 +139,11 @@ struct server_slot {
 
     slot_state state = SLOT_STATE_IDLE;
     slot_command command = SLOT_COMMAND_NONE;
+
+    //jinyu: add ggml tensor
+    struct ggml_tensor* trans_tensor;
+    int s_layer;
+    int e_layer;
 
     // used to determine the slot that has been used the longest
     int64_t t_last_used = -1;
@@ -210,6 +218,11 @@ struct server_slot {
         n_past_se          = 0;
 
         generated_token_probs.clear();
+    }
+
+    //jinyu
+    void set_transfer_feature(ggml_tensor* trans_tensor) {
+        this->trans_tensor = trans_tensor;
     }
 
     bool has_budget(gpt_params &global_params) {
@@ -1355,6 +1368,14 @@ struct server_context {
         task.embedding = embedding;
         task.type      = SERVER_TASK_TYPE_COMPLETION;
 
+        // jinyu: add data
+        struct ggml_tensor* trans_tensor = {};
+        int s_layer = 0;
+        int e_layer = 10;
+        task.trans_tensor = trans_tensor;
+        task.s_layer = s_layer;
+        task.e_layer = e_layer;
+
         // when a completion task's prompt array is not a singleton, we split it into multiple requests
         // otherwise, it's a single-prompt task, we actually queue it
         // if there's numbers in the prompt array it will be treated as an array of tokens
@@ -1443,6 +1464,11 @@ struct server_context {
                     slot->id_multi  = task.id_multi;
                     slot->infill    = task.infill;
                     slot->embedding = task.embedding;
+
+                    // jinyu: add inp_tensor
+                    slot->trans_tensor = task.trans_tensor;
+                    slot->s_layer = task.s_layer;
+                    slot->e_layer = task.e_layer;
 
                     if (!launch_slot_with_data(*slot, task.data)) {
                         // send error result
@@ -1989,7 +2015,25 @@ struct server_context {
                 0, 0, 0, // unused
             };
 
+            //jinyu: set the start_layer and end_layer into ctx
+            //jinyu TODO: need to classify the first node and other node because of batching!!! NEED TO MODIFY for batching
+            int s_layer,e_layer;
+            struct ggml_tensor* trans_tensor;
+            for (auto& slot : slots) {
+                s_layer = slot.s_layer;
+                e_layer = slot.e_layer;
+                trans_tensor = slot.trans_tensor;
+                break;
+            }
+            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
+
             const int ret = llama_decode(ctx, batch_view);
+
+            const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
+            for (auto& slot : slots) {
+                slot.set_transfer_feature(get_transfer_feature(ctx));
+                //send_feature_res(slot);
+            }
 
             if (ret != 0) {
                 if (n_batch == 1 || ret < 0) {
