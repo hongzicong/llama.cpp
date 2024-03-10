@@ -2027,8 +2027,6 @@ struct server_context {
             }
             llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
 
-            const int ret = llama_decode(ctx, batch_view);
-
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
             for (auto& slot : slots) {
                 slot.set_transfer_feature(get_transfer_feature(ctx));

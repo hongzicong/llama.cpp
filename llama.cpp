@@ -8702,6 +8702,143 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
     }
 }
 
+//jinyu: get tensor from graph
+struct ggml_tensor* ggml_graph_get_tensor_jinyu(struct ggml_cgraph* cgraph, const char* name) {
+    //for (int i = 0; i < cgraph->n_leafs; i++) {
+    //    struct ggml_tensor* leaf = cgraph->leafs[i];
+    //    //fprintf(stdout, "%s, ", leaf->name);
+    //    if (strcmp(leaf->name, name) == 0) {
+    //        return leaf;
+    //    }
+    //}
+    for (int i = 0; i < cgraph->n_nodes; i++) {
+        struct ggml_tensor* node = cgraph->nodes[i];
+        //fprintf(stdout, "%s, ", node->name);
+        if (strcmp(node->name, name) == 0) {
+            return node;
+        }
+    }
+
+    return NULL;
+}
+
+// jinyu: copy from ggml-mpi.c
+static int ggml_graph_get_node_idx_jinyu(struct ggml_cgraph* gf, const char* name) {
+    struct ggml_tensor* t = ggml_graph_get_tensor_jinyu(gf, name);
+    if (t == NULL) {
+        fprintf(stderr, "%s: tensor %s not found\n", __func__, name);
+        return -1;
+    }
+
+    for (int i = 0; i < gf->n_nodes; i++) {
+        if (gf->nodes[i] == t) {
+            return i;
+        }
+    }
+
+    fprintf(stderr, "%s: tensor %s not found in graph (should not happen)\n", __func__, name);
+    return -1;
+}
+
+// jinyu: setup the input and computation graph
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+static void demo_pre(
+        llama_context & lctx,
+        ggml_cgraph * gf,
+        int  n_layers){
+
+    int s_layer = lctx.s_layer, e_layer = n_layers - 1; //lctx.e_layer;  NEED TO CHANGE!!!
+    
+    struct ggml_tensor* inp_tokens = ggml_graph_get_tensor(gf, "inp_tokens (view)");
+    if (inp_tokens == NULL) {
+        fprintf(stderr, "%s: tensor 'inp_tokens' not found\n", __func__);
+        return;
+    }
+
+    struct ggml_tensor* inp0 = ggml_graph_get_tensor(gf, "inp_embd");
+    if (inp0 == NULL) {
+        fprintf(stderr, "%s: tensor 'inp0' not found\n", __func__);
+        return;
+    }
+    if (s_layer > 0) {
+        // if not from the input, assign the value
+        inp0 = lctx.trans_tensor;
+    }
+    else {
+        inp_tokens = lctx.inp_tokens;
+    }
+
+    //GGML_ASSERT(inp0 == gf->nodes[0]);
+    
+    // setup the computation graph
+    {
+
+        // jinyu: modify these two parameters
+        const int il0 = s_layer;
+        const int il1 = MIN(n_layers, e_layer);
+
+        char name_l0[GGML_MAX_NAME];
+        char name_l1[GGML_MAX_NAME];
+
+        if (s_layer == 0)
+            snprintf(name_l0, sizeof(name_l0), "inp_tokens (view)");
+        else
+            snprintf(name_l0, sizeof(name_l0), "l_out-%d", il0-1);  // start from l_out-[i10-1] (output of last layer)
+        snprintf(name_l1, sizeof(name_l1), "l_out-%d", il1);
+
+        const int idx_l0 = ggml_graph_get_node_idx_jinyu(gf, name_l0);
+        const int idx_l1 = e_layer != n_layers-1 ? ggml_graph_get_node_idx_jinyu(gf, name_l1) + 1 : gf->n_nodes;
+        //fprintf(stdout, "%s, %s, %d, %d\n", name_l0, name_l1, idx_l0, idx_l1);
+        
+        if (idx_l0 < 0 || idx_l1 < 0) {
+            fprintf(stderr, "%s: layer input nodes not found\n", __func__);
+            return;
+        }
+
+        // attach the input data to all nodes that need it
+        // TODO: not great - should be able to do this without modifying the compute graph (see next TODO below)
+        if (s_layer > 0) {
+            // jinyu: change the input to inp0 
+            for (int i = idx_l0; i < idx_l1; i++) {
+                if (gf->nodes[i]->src[0] == gf->nodes[idx_l0]) {
+                    gf->nodes[i]->src[0] = inp0;
+                }
+                if (gf->nodes[i]->src[1] == gf->nodes[idx_l0]) {
+                    gf->nodes[i]->src[1] = inp0;
+                }
+            }
+
+            // TODO: instead of rearranging the nodes, we should be able to execute a subset of the compute graph
+            gf->nodes[0] = inp0; // jinyu: first node: input feature
+            for (int i = 1; i < idx_l1 - idx_l0; i++) {
+                gf->nodes[i] = gf->nodes[idx_l0 + i];
+                gf->grads[i] = gf->grads[idx_l0 + i];
+            }
+        }
+
+        // the first node performs the "get_rows" operation, the rest of the nodes get the data from the previous node
+        if (s_layer != 0) {
+            gf->nodes[0]->op = GGML_OP_NONE;
+        }
+
+        gf->n_nodes = idx_l1 - idx_l0;
+
+        //fprintf(stderr, "%s: node %d: processing %d nodes [%d, %d)\n", __func__, 0, gf->n_nodes, il0, il1);
+    }
+
+}
+
+// jinyu: get the output feature
+#define UNUSED GGML_UNUSED
+static void demo_post(
+        llama_context & lctx,
+             struct ggml_cgraph * gf,
+                            int   n_layers) {
+    UNUSED(n_layers);
+
+    lctx.trans_tensor = gf->nodes[gf->n_nodes - 1];
+}
+
 static void llama_graph_compute(
         llama_context & lctx,
           ggml_cgraph * gf,
@@ -8717,12 +8854,22 @@ static void llama_graph_compute(
     }
 #endif
 
+    // jinyu
+    const int64_t n_layer = lctx.model.hparams.n_layer;
+    int s_layer = lctx.s_layer, e_layer = lctx.e_layer;
+
+    if(s_layer!=-1)
+        demo_pre(lctx, gf, n_layer);
+
     if (lctx.backend_cpu != nullptr) {
         ggml_backend_cpu_set_n_threads(lctx.backend_cpu, n_threads);
         ggml_backend_cpu_set_abort_callback(lctx.backend_cpu, lctx.abort_callback, lctx.abort_callback_data);
     }
 
     ggml_backend_sched_graph_compute(lctx.sched, gf);
+
+    if (s_layer != -1)
+        demo_post(lctx, gf, n_layer);
 
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(lctx.sched));
 
@@ -8839,6 +8986,46 @@ static int llama_decode_internal(
     ggml_cgraph * gf = llama_build_graph(lctx, batch, false);
 
     // the output is always the last tensor in the graph
+     //struct ggml_tensor * res  = gf->nodes[gf->n_nodes - 1];
+     //struct ggml_tensor * embd = gf->nodes[gf->n_nodes - 2];
+
+     //if (!hparams.causal_attn) {
+     //    res = nullptr; // do not extract logits for embedding models such as BERT
+
+     //    // token or sequence embeddings
+     //    embd = gf->nodes[gf->n_nodes - 1];
+
+     //    GGML_ASSERT(strcmp(embd->name, "result_embd") == 0 || strcmp(embd->name, "result_embd_pooled") == 0);
+     //} else {
+     //    if (strcmp(res->name, "result_output") == 0) {
+     //        // the token embeddings could be the second to last tensor, or the third to last tensor
+     //        if (strcmp(embd->name, "result_norm") != 0) {
+     //            embd = gf->nodes[gf->n_nodes - 3];
+     //            GGML_ASSERT(strcmp(embd->name, "result_norm") == 0);
+     //        }
+     //    } else {
+     //        GGML_ASSERT(false && "missing result_output tensor");
+     //    }
+     //}
+
+    // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
+
+    // for big prompts, if BLAS is enabled, it is better to use only one thread
+    // otherwise, the threads are spin-lock waiting for the BLAS calls and are degrading the performance
+    // TODO: this is mostly important for Apple Silicon where CBLAS is still performing very well
+    //       we still need some threads to process all non-mul_mat ops, but not too much to avoid interfering
+    //       with the BLAS calls. need a better solution
+    // MoE Special Case: This logic applies when hparams.n_expert == 0, i.e. the model is NOT an MoE model. When an MoE is
+    //                   being processed then Accelerate/BLAS will not be involved, so capping would limit performance.
+    if (n_tokens >= 32 && hparams.n_expert == 0 && ggml_cpu_has_blas() && !ggml_cpu_has_gpublas()) {
+        n_threads = std::min(4, n_threads);
+    }
+
+    llama_set_inputs(lctx, batch);
+
+    llama_graph_compute(lctx, gf, n_threads);
+
+    //---jinyu: start, the res should be put after compute
     struct ggml_tensor * res  = gf->nodes[gf->n_nodes - 1];
     struct ggml_tensor * embd = gf->nodes[gf->n_nodes - 2];
 
@@ -8860,23 +9047,7 @@ static int llama_decode_internal(
             GGML_ASSERT(false && "missing result_output tensor");
         }
     }
-
-    // LLAMA_LOG_INFO("graph build time: %.3f ms (%d nodes, %d leafs)\n", (ggml_time_us() - t_start_us)/1000.0, gf->n_nodes, gf->n_leafs);
-
-    // for big prompts, if BLAS is enabled, it is better to use only one thread
-    // otherwise, the threads are spin-lock waiting for the BLAS calls and are degrading the performance
-    // TODO: this is mostly important for Apple Silicon where CBLAS is still performing very well
-    //       we still need some threads to process all non-mul_mat ops, but not too much to avoid interfering
-    //       with the BLAS calls. need a better solution
-    // MoE Special Case: This logic applies when hparams.n_expert == 0, i.e. the model is NOT an MoE model. When an MoE is
-    //                   being processed then Accelerate/BLAS will not be involved, so capping would limit performance.
-    if (n_tokens >= 32 && hparams.n_expert == 0 && ggml_cpu_has_blas() && !ggml_cpu_has_gpublas()) {
-        n_threads = std::min(4, n_threads);
-    }
-
-    llama_set_inputs(lctx, batch);
-
-    llama_graph_compute(lctx, gf, n_threads);
+    //---jinyu: end.
 
     // update the kv ring buffer
     {
@@ -13069,9 +13240,9 @@ uint32_t llama_n_max_seq(const struct llama_context * ctx) {
     return ctx->kv_self.size;
 }
 
-enum llama_vocab_type llama_vocab_type(const struct llama_model * model) {
-    return model->vocab.type;
-}
+// enum llama_vocab_type llama_vocab_type(const struct llama_model * model) {
+//     return model->vocab.type;
+// }
 
 enum llama_rope_type llama_rope_type(const struct llama_model * model) {
     switch (model->arch) {
