@@ -72,6 +72,11 @@ struct server_task {
 
     bool infill    = false;
     bool embedding = false;
+
+    //jinyu: add attribute
+    struct ggml_tensor* trans_tensor;
+    int s_layer;
+    int e_layer;
 };
 
 struct server_task_result {
