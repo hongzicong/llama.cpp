@@ -1358,6 +1358,17 @@ struct server_context {
         queue_results.send(res);
     }
 
+    //jinyu: write features to results
+    void send_feature_res(server_slot& slot) {
+        server_task_result res;
+        res.id = slot.id_task;
+        res.id_multi = slot.id_multi;
+        res.error = false;
+        res.stop = true;
+        res.trans_tensor = slot.trans_tensor;
+        queue_results.send(res);
+    }
+
     void request_completion(int id_task, int id_multi, json data, bool infill, bool embedding) {
         server_task task;
         task.id        = id_task;
@@ -1689,7 +1700,7 @@ struct server_context {
         // start populating the batch for this iteration
         llama_batch_clear(batch);
 
-        // frist, add sampled tokens from any ongoing sequences
+        // frist, add sampled tokens from any ongoing sequences (decode any currently ongoing sequences)
         for (auto & slot : slots) {
             if (slot.state == SLOT_STATE_IDLE) {
                 continue;
@@ -2028,6 +2039,7 @@ struct server_context {
             llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
 
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
+
             for (auto& slot : slots) {
                 slot.set_transfer_feature(get_transfer_feature(ctx));
                 //send_feature_res(slot);
