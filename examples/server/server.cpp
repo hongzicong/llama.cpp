@@ -3176,8 +3176,8 @@ int main(int argc, char ** argv) {
 
 
                     } else {
-                        slot_id = output_json['slot_id'];
-                        std::vector<float> vector_data = output_json['vector_data'];
+                        slot_id = output_json["slot_id"];
+                        std::vector<float> vector_data = output_json["vector_data"];
                         input_json = {
                                 {"prompt",           prompt},
                                 {"s_layer",          vec_worknode_layer_index[i].first},
@@ -3197,8 +3197,8 @@ int main(int argc, char ** argv) {
 
                 }
                 sink.write(response_str.c_str(), response_str.size());
-                stop = output_json['stop'];
-                token_id = output_json['token_id'];
+                stop = output_json["stop"];
+                token_id = output_json["token_id"];
                 if (stop) {
                     break;
                 }
