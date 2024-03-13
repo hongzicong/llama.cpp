@@ -1982,6 +1982,113 @@ struct server_context {
             {"n_tokens", batch.n_tokens},
         });
 
+        //jinyu: different processing methods for different node
+        //start---
+        int s_layer,e_layer;
+        struct ggml_tensor* trans_tensor;
+        const int64_t n_layer = get_transfer_nlayer(ctx);
+        for (auto& slot : slots) {
+            s_layer = slot.s_layer;
+            e_layer = slot.e_layer;
+            trans_tensor = slot.trans_tensor;
+            break;
+        }
+        if(s_layer!=0){  // start from node 2, we neglect the batching
+            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
+            int32_t i=0; // assume a batch
+            const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
+            llama_batch batch_view = {
+                n_tokens,
+                batch.token    + i,
+                nullptr,
+                batch.pos      + i,
+                batch.n_seq_id + i,
+                batch.seq_id   + i,
+                batch.logits   + i,
+                0, 0, 0, // unused
+            };
+            const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
+            for (auto& slot : slots) {
+                slot.set_transfer_feature(get_transfer_feature(ctx));
+                if(e_layer!=n_layer) // if it is not the last node, send the feature
+                    send_feature_res(slot);
+            }
+
+            if(e_layer==n_layer){ // process the output result
+                if (ret != 0) {
+                    if (n_batch == 1 || ret < 0) {
+                        // if you get here, it means the KV cache is full - try increasing it via the context size
+                        LOG_TEE("%s : failed to decode the batch, n_batch = %d, ret = %d\n", __func__, n_batch, ret);
+                        return false;
+                    }
+
+                    LOG_TEE("%s : failed to find free space in the KV cache, retrying with smaller n_batch = %d\n", __func__, n_batch / 2);
+
+                    // retry with half the batch size to try to find a free slot in the KV cache
+                    n_batch /= 2;
+                    i -= n_batch;
+                }
+
+                for (auto & slot : slots) {
+                    if (slot.state != SLOT_STATE_PROCESSING || slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
+                        continue;
+                    }
+
+                    // prompt evaluated for embedding
+                    if (slot.embedding) {
+                        send_embedding(slot, batch_view);
+                        slot.release();
+                        slot.i_batch = -1;
+                        continue;
+                    }
+
+                    completion_token_output result;
+                    const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
+
+                    llama_sampling_accept(slot.ctx_sampling, ctx, id, true);
+
+                    slot.n_decoded += 1;
+                    if (slot.n_decoded == 1) {
+                        slot.t_start_generation = ggml_time_us();
+                        slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
+                        metrics.on_prompt_eval(slot);
+                    }
+
+                    llama_token_data_array cur_p = { slot.ctx_sampling->cur.data(), slot.ctx_sampling->cur.size(), false };
+                    result.tok = id;
+
+                    const int32_t n_probs = slot.sparams.n_probs;
+                    if (slot.sparams.temp <= 0 && n_probs > 0) {
+                        // for llama_sample_token_greedy we need to sort candidates
+                        llama_sample_softmax(ctx, &cur_p);
+                    }
+
+                    for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
+                        result.probs.push_back({
+                            cur_p.data[i].id,
+                            cur_p.data[i].p
+                        });
+                    }
+
+                    if (!process_token(result, slot)) {
+                        slot.release();
+                        slot.print_timings();
+                        send_final_response(slot);
+                        metrics.on_prediction(slot);
+                    }
+
+                    slot.i_batch = -1;
+                }
+            }
+
+
+            LOG_VERBOSE("slots updated", {});
+            return true;
+
+        }
+        //end---
+
+
         // process the created batch of tokens
         for (int32_t i = 0; i < (int32_t) batch.n_tokens; i += n_batch) {
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
@@ -2027,7 +2134,7 @@ struct server_context {
             };
 
             //jinyu: set the start_layer and end_layer into ctx
-            //jinyu TODO: need to classify the first node and other node because of batching!!! NEED TO MODIFY for batching
+            //jinyu TODO: need to classify the first node and other node because of batching!!! 
             int s_layer,e_layer;
             struct ggml_tensor* trans_tensor;
             for (auto& slot : slots) {
@@ -2042,74 +2149,77 @@ struct server_context {
 
             for (auto& slot : slots) {
                 slot.set_transfer_feature(get_transfer_feature(ctx));
-                //send_feature_res(slot);
+                if(e_layer!=n_layer)
+                    send_feature_res(slot);
             }
 
-            if (ret != 0) {
-                if (n_batch == 1 || ret < 0) {
-                    // if you get here, it means the KV cache is full - try increasing it via the context size
-                    LOG_TEE("%s : failed to decode the batch, n_batch = %d, ret = %d\n", __func__, n_batch, ret);
-                    return false;
-                }
+            if(e_layer==n_layer){
+                if (ret != 0) {
+                    if (n_batch == 1 || ret < 0) {
+                        // if you get here, it means the KV cache is full - try increasing it via the context size
+                        LOG_TEE("%s : failed to decode the batch, n_batch = %d, ret = %d\n", __func__, n_batch, ret);
+                        return false;
+                    }
 
-                LOG_TEE("%s : failed to find free space in the KV cache, retrying with smaller n_batch = %d\n", __func__, n_batch / 2);
+                    LOG_TEE("%s : failed to find free space in the KV cache, retrying with smaller n_batch = %d\n", __func__, n_batch / 2);
 
-                // retry with half the batch size to try to find a free slot in the KV cache
-                n_batch /= 2;
-                i -= n_batch;
+                    // retry with half the batch size to try to find a free slot in the KV cache
+                    n_batch /= 2;
+                    i -= n_batch;
 
-                continue;
-            }
-
-            for (auto & slot : slots) {
-                if (slot.state != SLOT_STATE_PROCESSING || slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
                     continue;
                 }
 
-                // prompt evaluated for embedding
-                if (slot.embedding) {
-                    send_embedding(slot, batch_view);
-                    slot.release();
+                for (auto & slot : slots) {
+                    if (slot.state != SLOT_STATE_PROCESSING || slot.i_batch < (int) i || slot.i_batch >= (int) (i + n_tokens)) {
+                        continue;
+                    }
+
+                    // prompt evaluated for embedding
+                    if (slot.embedding) {
+                        send_embedding(slot, batch_view);
+                        slot.release();
+                        slot.i_batch = -1;
+                        continue;
+                    }
+
+                    completion_token_output result;
+                    const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
+
+                    llama_sampling_accept(slot.ctx_sampling, ctx, id, true);
+
+                    slot.n_decoded += 1;
+                    if (slot.n_decoded == 1) {
+                        slot.t_start_generation = ggml_time_us();
+                        slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
+                        metrics.on_prompt_eval(slot);
+                    }
+
+                    llama_token_data_array cur_p = { slot.ctx_sampling->cur.data(), slot.ctx_sampling->cur.size(), false };
+                    result.tok = id;
+
+                    const int32_t n_probs = slot.sparams.n_probs;
+                    if (slot.sparams.temp <= 0 && n_probs > 0) {
+                        // for llama_sample_token_greedy we need to sort candidates
+                        llama_sample_softmax(ctx, &cur_p);
+                    }
+
+                    for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
+                        result.probs.push_back({
+                            cur_p.data[i].id,
+                            cur_p.data[i].p
+                        });
+                    }
+
+                    if (!process_token(result, slot)) {
+                        slot.release();
+                        slot.print_timings();
+                        send_final_response(slot);
+                        metrics.on_prediction(slot);
+                    }
+
                     slot.i_batch = -1;
-                    continue;
                 }
-
-                completion_token_output result;
-                const llama_token id = llama_sampling_sample(slot.ctx_sampling, ctx, NULL, slot.i_batch - i);
-
-                llama_sampling_accept(slot.ctx_sampling, ctx, id, true);
-
-                slot.n_decoded += 1;
-                if (slot.n_decoded == 1) {
-                    slot.t_start_generation = ggml_time_us();
-                    slot.t_prompt_processing = (slot.t_start_generation - slot.t_start_process_prompt) / 1e3;
-                    metrics.on_prompt_eval(slot);
-                }
-
-                llama_token_data_array cur_p = { slot.ctx_sampling->cur.data(), slot.ctx_sampling->cur.size(), false };
-                result.tok = id;
-
-                const int32_t n_probs = slot.sparams.n_probs;
-                if (slot.sparams.temp <= 0 && n_probs > 0) {
-                    // for llama_sample_token_greedy we need to sort candidates
-                    llama_sample_softmax(ctx, &cur_p);
-                }
-
-                for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
-                    result.probs.push_back({
-                        cur_p.data[i].id,
-                        cur_p.data[i].p
-                    });
-                }
-
-                if (!process_token(result, slot)) {
-                    slot.release();
-                    slot.print_timings();
-                    send_final_response(slot);
-                    metrics.on_prediction(slot);
-                }
-
-                slot.i_batch = -1;
             }
         }
 
