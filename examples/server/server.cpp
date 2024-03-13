@@ -1382,7 +1382,7 @@ struct server_context {
         // jinyu: add data
         struct ggml_tensor* trans_tensor = {};
         int s_layer = 0;
-        int e_layer = 10;
+        int e_layer = 31;
         task.trans_tensor = trans_tensor;
         task.s_layer = s_layer;
         task.e_layer = e_layer;
@@ -2010,11 +2010,11 @@ struct server_context {
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
             for (auto& slot : slots) {
                 slot.set_transfer_feature(get_transfer_feature(ctx));
-                if(e_layer!=n_layer) // if it is not the last node, send the feature
+                if(e_layer+1!=n_layer) // if it is not the last node, send the feature
                     send_feature_res(slot);
             }
 
-            if(e_layer==n_layer){ // process the output result
+            if(e_layer+1==n_layer){ // process the output result
                 if (ret != 0) {
                     if (n_batch == 1 || ret < 0) {
                         // if you get here, it means the KV cache is full - try increasing it via the context size
@@ -2149,11 +2149,11 @@ struct server_context {
 
             for (auto& slot : slots) {
                 slot.set_transfer_feature(get_transfer_feature(ctx));
-                if(e_layer!=n_layer)
+                if(e_layer + 1 != n_layer)
                     send_feature_res(slot);
             }
 
-            if(e_layer==n_layer){
+            if(e_layer + 1 == n_layer){  // e_layer+1==n_layer
                 if (ret != 0) {
                     if (n_batch == 1 || ret < 0) {
                         // if you get here, it means the KV cache is full - try increasing it via the context size
