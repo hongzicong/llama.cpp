@@ -3111,6 +3111,106 @@ int main(int argc, char ** argv) {
     svr.Post("/completions", completions);
     svr.Post("/v1/completions", completions);
 
+    //linjian: add masternode schedule logic
+    /*
+     * how to serialize ggml_tensor->data --> transform pointer to vector, then put it into json
+     *     float* data = (float*)(ggml_tenosr-<data);
+     *     std::vector<float> ve (data, data+ggml_nelements(ggml_tensor));
+     *     json = output_json = {"ggml_tensor_data", ve};
+     *     output = output_json.dump();
+     *
+     * how to deserialize ggml_tensor->data --> get vector from json, transform vector to pointer
+     *     output_json = json::parse(output);
+     *     float* vecPtr = output_json['ggml_tensor_data'].data();
+     *     ggml_tensor->data = (void*)(vecPtr);
+     */
+    const auto masternode_schedule = [&validate_api_key](const httplib::Request & req, httplib::Response & res){
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+        // store start layer index and end layer index and currently set up manually
+        // TODO： need a model layer devided strategy
+        std::vector<std::string> vec_worknode_ipaddress;
+        vec_worknode_ipaddress.push_back("http://127.0.0.1:8081");
+        vec_worknode_ipaddress.push_back("http://127.0.0.1:8082");
+        std::vector<std::pair<int, int>> vec_worknode_layer_index;
+        vec_worknode_layer_index.push_back(std::make_pair(1,2));
+        vec_worknode_layer_index.push_back(std::make_pair(3,4));
+
+        json input_json;
+        json output_json;
+
+        // worknode output content
+        int token_id = -1;
+        int slot_id = -1;
+        bool stop = false;
+        // ggml_tensor->data: std::vector<float> vector_data
+
+        // user requrest content
+        std::string prompt = req.body;
+        // worknode response content
+        std::string response_str = "";
+
+
+        const auto chunked_content_provider = [&](size_t, httplib::DataSink & sink){
+            while (true) {
+                for (int i = 0; i < vec_worknode_layer_index.size(); i++) {
+                    if (i == 0) {
+                        // initialize json data, and transform json to json string
+                        std::vector<float> vector_data;
+                        input_json = {
+                                {"prompt",           prompt},
+                                {"s_layer",          vec_worknode_layer_index[i].first},
+                                {"e_layer",          vec_worknode_layer_index[i].second},
+                                {"ggml_tensor_data", vector_data},
+                                {"token_id",         token_id},
+                                {"slot_id",          slot_id}
+                        };
+                        std::string input = input_json.dump();
+
+                        // send post request to worknode
+                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
+                        auto forwarded_res = cli.Post("/completion", input, "application/json; charset=utf-8");
+                        response_str = forwarded_res->body;
+
+
+                    } else {
+                        slot_id = output_json['slot_id'];
+                        std::vector<float> vector_data = output_json['vector_data'];
+                        input_json = {
+                                {"prompt",           prompt},
+                                {"s_layer",          vec_worknode_layer_index[i].first},
+                                {"e_layer",          vec_worknode_layer_index[i].second},
+                                {"ggml_tensor_data", vector_data},
+                                {"token_id",         token_id},
+                                {"slot_id",          slot_id}
+                        };
+                        std::string input = input_json.dump();
+
+                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
+                        auto forwarded_res = cli.Post("/completion", input, "application/json; charset=utf-8");
+                        response_str = forwarded_res->body;
+
+                    }
+                    output_json = json::parse(response_str);
+
+                }
+                sink.write(response_str.c_str(), response_str.size());
+                stop = output_json['stop'];
+                token_id = output_json['token_id'];
+                if (stop) {
+                    break;
+                }
+            }
+            sink.done();
+            return true;
+        };
+        res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
+
+    };
+    svr.Post("/masternode_schedule", masternode_schedule);
+
     svr.Get("/v1/models", [&params, &model_meta](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
 
