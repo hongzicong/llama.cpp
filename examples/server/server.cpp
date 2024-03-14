@@ -77,6 +77,8 @@ struct server_task {
     struct ggml_tensor* trans_tensor;
     int s_layer;
     int e_layer;
+    llama_token token_id;
+    float* ggml_tensor_data;
 };
 
 struct server_task_result {
@@ -144,6 +146,7 @@ struct server_slot {
     struct ggml_tensor* trans_tensor;
     int s_layer;
     int e_layer;
+    float* ggml_tensor_data;
 
     // used to determine the slot that has been used the longest
     int64_t t_last_used = -1;
@@ -1381,11 +1384,13 @@ struct server_context {
 
         // jinyu: add data
         struct ggml_tensor* trans_tensor = {};
-        int s_layer = 0;
-        int e_layer = 31;
+        int s_layer = json_value(task.data, "s_layer", 0);
+        int e_layer = json_value(task.data, "e_layer", 31);
         task.trans_tensor = trans_tensor;
         task.s_layer = s_layer;
         task.e_layer = e_layer;
+        task.token_id = json_value(task.data, "token_id", 0);
+        task.ggml_tensor_data = json_value(task.data, "ggml_tensor_data", nullptr);
 
         // when a completion task's prompt array is not a singleton, we split it into multiple requests
         // otherwise, it's a single-prompt task, we actually queue it
@@ -1480,6 +1485,8 @@ struct server_context {
                     slot->trans_tensor = task.trans_tensor;
                     slot->s_layer = task.s_layer;
                     slot->e_layer = task.e_layer;
+                    slot->sampled = task.token_id;
+                    slot->ggml_tensor_data = task.ggml_tensor_data;
 
                     if (!launch_slot_with_data(*slot, task.data)) {
                         // send error result
@@ -1931,7 +1938,7 @@ struct server_context {
                             }
                         }
 
-                        llama_batch_add(batch, prompt_tokens[slot.n_past], system_tokens.size() + slot_npast, { slot.id + 1 }, false);
+                        llama_batch_add(batch, prompt_tokens[slot.n_past], system_tokens.size() + slot_npast, { slot.id + 1 }, false);  // no need to get logits
 
                         if (slot.params.cache_prompt) {
                             slot.cache_tokens.push_back(prompt_tokens[slot.n_past]);
@@ -1990,14 +1997,16 @@ struct server_context {
         //jinyu: different processing methods for different node
         //start---
         struct ggml_tensor* trans_tensor;
+        float* ggml_tensor_data;
         for (auto& slot : slots) {
             s_layer = slot.s_layer;
             e_layer = slot.e_layer;
             trans_tensor = slot.trans_tensor;
+            ggml_tensor_data = slot.ggml_tensor_data;
             break;
         }
         if(s_layer!=0){  // start from node 2, we neglect the batching
-            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
+            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor, ggml_tensor_data);  // assign three values to attributes of ctx
             int32_t i=0; // assume a batch
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
             llama_batch batch_view = {
@@ -2140,13 +2149,15 @@ struct server_context {
             //jinyu TODO: need to classify the first node and other node because of batching!!! 
             int s_layer,e_layer;
             struct ggml_tensor* trans_tensor;
+            float* ggml_tensor_data;
             for (auto& slot : slots) {
                 s_layer = slot.s_layer;
                 e_layer = slot.e_layer;
                 trans_tensor = slot.trans_tensor;
+                ggml_tensor_data = slot.ggml_tensor_data;
                 break;
             }
-            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor);  // assign three values to attributes of ctx
+            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor, ggml_tensor_data);  // assign three values to attributes of ctx
 
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
 

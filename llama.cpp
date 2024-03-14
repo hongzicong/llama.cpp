@@ -2048,6 +2048,7 @@ struct llama_context {
     int s_layer=-1;
     int e_layer=-1;
     struct ggml_tensor* trans_tensor;
+    float* ggml_tensor_data;
 
     int64_t t_start_us;
     int64_t t_load_us;
@@ -8762,7 +8763,7 @@ static void demo_pre(
     }
     if (s_layer > 0) {
         // if not from the input, assign the value
-        inp0 = lctx.trans_tensor;
+        inp0->data = (void*)(lctx.ggml_tensor_data);
     }
     else {
         inp_tokens = lctx.inp_tokens;
@@ -13220,10 +13221,11 @@ uint32_t llama_n_batch(const struct llama_context * ctx) {
 }
 
 // jinyu
-void llama_set_s_e_inference(struct llama_context * ctx, int s_layer, int e_layer, struct ggml_tensor* trans_tensor) {
+void llama_set_s_e_inference(struct llama_context * ctx, int s_layer, int e_layer, struct ggml_tensor* trans_tensor, float* ggml_tensor_data) {
     ctx->s_layer = s_layer;
     ctx->e_layer = e_layer;
     ctx->trans_tensor = trans_tensor;
+    ctx->ggml_tensor_data = ggml_tensor_data;
 }
 struct ggml_tensor* get_transfer_feature(struct llama_context* ctx) {
     return ctx->trans_tensor;
