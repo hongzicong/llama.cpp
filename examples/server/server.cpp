@@ -1605,8 +1605,12 @@ struct server_context {
             system_prompt_update();
         }
 
+        const int64_t n_layer = get_transfer_nlayer(ctx);
+        int s_layer, e_layer;
         // release slots
         for (auto & slot : slots) {
+            s_layer = slot.s_layer;
+            e_layer = slot.e_layer;
             if (slot.command == SLOT_COMMAND_RELEASE) {
                 slot.state       = SLOT_STATE_IDLE;
                 slot.command     = SLOT_COMMAND_NONE;
@@ -1647,6 +1651,7 @@ struct server_context {
             }
         }
 
+        if(e_layer-s_layer+1==n_layer)
         {
             LOG_VERBOSE("posting NEXT_RESPONSE", {});
 
@@ -1984,9 +1989,7 @@ struct server_context {
 
         //jinyu: different processing methods for different node
         //start---
-        int s_layer,e_layer;
         struct ggml_tensor* trans_tensor;
-        const int64_t n_layer = get_transfer_nlayer(ctx);
         for (auto& slot : slots) {
             s_layer = slot.s_layer;
             e_layer = slot.e_layer;
