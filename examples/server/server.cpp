@@ -91,7 +91,7 @@ struct server_task_result {
     bool error;
 
     //jinyu
-    struct ggml_tensor* trans_tensor=nullptr;
+    float* ggml_tensor_data = nullptr;
 };
 
 struct server_task_multi {
@@ -1368,7 +1368,7 @@ struct server_context {
         res.id_multi = slot.id_multi;
         res.error = false;
         res.stop = true;
-        res.trans_tensor = slot.trans_tensor;
+        res.ggml_tensor_data = (float *)(slot.trans_tensor->data);
         queue_results.send(res);
     }
 
