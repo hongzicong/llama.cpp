@@ -1,5 +1,6 @@
 #include "utils.hpp"
-
+// linjian : add ggml.h
+#include "ggml.h"
 #include "common.h"
 #include "llama.h"
 #include "grammar-parser.h"
@@ -91,7 +92,9 @@ struct server_task_result {
     bool error;
 
     //jinyu
-    float* ggml_tensor_data = nullptr;
+    //float* ggml_tensor_data = nullptr;
+    //linjian:
+    std::vector<float> ggml_tensor_data;
 };
 
 struct server_task_multi {
@@ -268,15 +271,15 @@ struct server_slot {
 
     json get_formated_timings() const {
         return json {
-            {"prompt_n",               n_prompt_tokens_processed},
-            {"prompt_ms",              t_prompt_processing},
-            {"prompt_per_token_ms",    t_prompt_processing / n_prompt_tokens_processed},
-            {"prompt_per_second",      1e3 / t_prompt_processing * n_prompt_tokens_processed},
+                {"prompt_n",               n_prompt_tokens_processed},
+                {"prompt_ms",              t_prompt_processing},
+                {"prompt_per_token_ms",    t_prompt_processing / n_prompt_tokens_processed},
+                {"prompt_per_second",      1e3 / t_prompt_processing * n_prompt_tokens_processed},
 
-            {"predicted_n",            n_decoded},
-            {"predicted_ms",           t_token_generation},
-            {"predicted_per_token_ms", t_token_generation / n_decoded},
-            {"predicted_per_second",   1e3 / t_token_generation * n_decoded},
+                {"predicted_n",            n_decoded},
+                {"predicted_ms",           t_token_generation},
+                {"predicted_per_token_ms", t_token_generation / n_decoded},
+                {"predicted_per_second",   1e3 / t_token_generation * n_decoded},
         };
     }
 
@@ -315,8 +318,8 @@ struct server_slot {
         double n_tokens_second = 1e3 / t_prompt_processing * n_prompt_tokens_processed;
 
         snprintf(buffer, 512, "prompt eval time     = %10.2f ms / %5d tokens (%8.2f ms per token, %8.2f tokens per second)",
-                t_prompt_processing, n_prompt_tokens_processed,
-                t_token, n_tokens_second);
+                 t_prompt_processing, n_prompt_tokens_processed,
+                 t_token, n_tokens_second);
 
         LOG_INFO(buffer, {
             {"id_slot",                   id},
@@ -331,8 +334,8 @@ struct server_slot {
         n_tokens_second = 1e3 / t_token_generation * n_decoded;
 
         snprintf(buffer, 512, "generation eval time = %10.2f ms / %5d runs   (%8.2f ms per token, %8.2f tokens per second)",
-                t_token_generation, n_decoded,
-                t_token, n_tokens_second);
+                 t_token_generation, n_decoded,
+                 t_token, n_tokens_second);
 
         LOG_INFO(buffer, {
             {"id_slot",            id},
@@ -664,6 +667,8 @@ struct server_context {
     server_response queue_results;
 
     server_metrics metrics;
+
+    std::vector<std::string> results_vector;
 
     ~server_context() {
         if (ctx) {
@@ -1026,14 +1031,14 @@ struct server_context {
             for (int32_t i = 0; i < (int32_t) batch.n_tokens; i += params.n_batch) {
                 const int32_t n_tokens = std::min(params.n_batch, (int32_t) (batch.n_tokens - i));
                 llama_batch batch_view = {
-                    n_tokens,
-                    batch.token    + i,
-                    nullptr,
-                    batch.pos      + i,
-                    batch.n_seq_id + i,
-                    batch.seq_id   + i,
-                    batch.logits   + i,
-                    0, 0, 0, // unused
+                        n_tokens,
+                        batch.token    + i,
+                        nullptr,
+                        batch.pos      + i,
+                        batch.n_seq_id + i,
+                        batch.seq_id   + i,
+                        batch.logits   + i,
+                        0, 0, 0, // unused
                 };
 
                 if (llama_decode(ctx, batch_view) != 0) {
@@ -1116,8 +1121,8 @@ struct server_context {
             if (stop_pos != std::string::npos) {
                 is_stop_full = true;
                 slot.generated_text.erase(
-                    slot.generated_text.begin() + pos + stop_pos,
-                    slot.generated_text.end());
+                        slot.generated_text.begin() + pos + stop_pos,
+                        slot.generated_text.end());
                 pos = std::min(slot.n_sent_text, slot.generated_text.size());
             } else {
                 is_stop_full = false;
@@ -1187,38 +1192,38 @@ struct server_context {
         }
 
         return json {
-            {"n_ctx",                     slot.n_ctx},
-            {"n_predict",                 slot.n_predict},
-            {"model",                     params.model_alias},
-            {"seed",                      slot.params.seed},
-            {"temperature",               slot.sparams.temp},
-            {"dynatemp_range",            slot.sparams.dynatemp_range},
-            {"dynatemp_exponent",         slot.sparams.dynatemp_exponent},
-            {"top_k",                     slot.sparams.top_k},
-            {"top_p",                     slot.sparams.top_p},
-            {"min_p",                     slot.sparams.min_p},
-            {"tfs_z",                     slot.sparams.tfs_z},
-            {"typical_p",                 slot.sparams.typical_p},
-            {"repeat_last_n",             slot.sparams.penalty_last_n},
-            {"repeat_penalty",            slot.sparams.penalty_repeat},
-            {"presence_penalty",          slot.sparams.penalty_present},
-            {"frequency_penalty",         slot.sparams.penalty_freq},
-            {"penalty_prompt_tokens",     slot.sparams.penalty_prompt_tokens},
-            {"use_penalty_prompt_tokens", slot.sparams.use_penalty_prompt_tokens},
-            {"mirostat",                  slot.sparams.mirostat},
-            {"mirostat_tau",              slot.sparams.mirostat_tau},
-            {"mirostat_eta",              slot.sparams.mirostat_eta},
-            {"penalize_nl",               slot.sparams.penalize_nl},
-            {"stop",                      slot.params.antiprompt},
-            {"n_predict",                 slot.params.n_predict},
-            {"n_keep",                    params.n_keep},
-            {"ignore_eos",                ignore_eos},
-            {"stream",                    slot.params.stream},
-            {"logit_bias",                slot.sparams.logit_bias},
-            {"n_probs",                   slot.sparams.n_probs},
-            {"min_keep",                  slot.sparams.min_keep},
-            {"grammar",                   slot.sparams.grammar},
-            {"samplers",                  samplers_sequence}
+                {"n_ctx",                     slot.n_ctx},
+                {"n_predict",                 slot.n_predict},
+                {"model",                     params.model_alias},
+                {"seed",                      slot.params.seed},
+                {"temperature",               slot.sparams.temp},
+                {"dynatemp_range",            slot.sparams.dynatemp_range},
+                {"dynatemp_exponent",         slot.sparams.dynatemp_exponent},
+                {"top_k",                     slot.sparams.top_k},
+                {"top_p",                     slot.sparams.top_p},
+                {"min_p",                     slot.sparams.min_p},
+                {"tfs_z",                     slot.sparams.tfs_z},
+                {"typical_p",                 slot.sparams.typical_p},
+                {"repeat_last_n",             slot.sparams.penalty_last_n},
+                {"repeat_penalty",            slot.sparams.penalty_repeat},
+                {"presence_penalty",          slot.sparams.penalty_present},
+                {"frequency_penalty",         slot.sparams.penalty_freq},
+                {"penalty_prompt_tokens",     slot.sparams.penalty_prompt_tokens},
+                {"use_penalty_prompt_tokens", slot.sparams.use_penalty_prompt_tokens},
+                {"mirostat",                  slot.sparams.mirostat},
+                {"mirostat_tau",              slot.sparams.mirostat_tau},
+                {"mirostat_eta",              slot.sparams.mirostat_eta},
+                {"penalize_nl",               slot.sparams.penalize_nl},
+                {"stop",                      slot.params.antiprompt},
+                {"n_predict",                 slot.params.n_predict},
+                {"n_keep",                    params.n_keep},
+                {"ignore_eos",                ignore_eos},
+                {"stream",                    slot.params.stream},
+                {"logit_bias",                slot.sparams.logit_bias},
+                {"n_probs",                   slot.sparams.n_probs},
+                {"min_keep",                  slot.sparams.min_keep},
+                {"grammar",                   slot.sparams.grammar},
+                {"samplers",                  samplers_sequence}
         };
     }
 
@@ -1242,10 +1247,10 @@ struct server_context {
         res.error    = false;
         res.stop     = false;
         res.data     = json {
-            {"content",    tkn.text_to_send},
-            {"stop",       false},
-            {"id_slot",    slot.id},
-            {"multimodal", false}
+                {"content",    tkn.text_to_send},
+                {"stop",       false},
+                {"id_slot",    slot.id},
+                {"multimodal", false}
         };
 
         if (slot.sparams.n_probs > 0) {
@@ -1279,21 +1284,21 @@ struct server_context {
         res.error    = false;
         res.stop     = true;
         res.data     = json {
-            {"content",             !slot.params.stream ? slot.generated_text : ""},
-            {"id_slot",             slot.id},
-            {"stop",                true},
-            {"model",               params.model_alias},
-            {"tokens_predicted",    slot.n_decoded},
-            {"tokens_evaluated",    slot.n_prompt_tokens},
-            {"generation_settings", get_formated_generation(slot)},
-            {"prompt",              slot.prompt},
-            {"truncated",           slot.truncated},
-            {"stopped_eos",         slot.stopped_eos},
-            {"stopped_word",        slot.stopped_word},
-            {"stopped_limit",       slot.stopped_limit},
-            {"stopping_word",       slot.stopping_word},
-            {"tokens_cached",       slot.n_past},
-            {"timings",             slot.get_formated_timings()}
+                {"content",             !slot.params.stream ? slot.generated_text : ""},
+                {"id_slot",             slot.id},
+                {"stop",                true},
+                {"model",               params.model_alias},
+                {"tokens_predicted",    slot.n_decoded},
+                {"tokens_evaluated",    slot.n_prompt_tokens},
+                {"generation_settings", get_formated_generation(slot)},
+                {"prompt",              slot.prompt},
+                {"truncated",           slot.truncated},
+                {"stopped_eos",         slot.stopped_eos},
+                {"stopped_word",        slot.stopped_word},
+                {"stopped_limit",       slot.stopped_limit},
+                {"stopping_word",       slot.stopping_word},
+                {"tokens_cached",       slot.n_past},
+                {"timings",             slot.get_formated_timings()}
         };
 
         if (slot.sparams.n_probs > 0) {
@@ -1343,18 +1348,18 @@ struct server_context {
             if (embd == NULL) {
                 LOG_ERROR("failed to get embeddings", {
                     {"token",  batch.token [i]},
-                        {"seq_id", batch.seq_id[i][0]}
+                    {"seq_id", batch.seq_id[i][0]}
                 });
 
                 res.data = json {
-                    {"embedding", std::vector<float>(n_embd, 0.0f)},
+                        {"embedding", std::vector<float>(n_embd, 0.0f)},
                 };
 
                 continue;
             }
 
             res.data = json {
-                {"embedding", std::vector<float>(embd, embd + n_embd)},
+                    {"embedding", std::vector<float>(embd, embd + n_embd)},
             };
         }
 
@@ -1368,7 +1373,11 @@ struct server_context {
         res.id_multi = slot.id_multi;
         res.error = false;
         res.stop = true;
-        res.ggml_tensor_data = (float *)(slot.trans_tensor->data);
+        // linjian: transform pointer to vector
+        float* data = (float *)(slot.trans_tensor->data);
+        std::vector<float> ve (data, data + ggml_nelements(slot.trans_tensor));
+        res.ggml_tensor_data = ve;
+        //res.ggml_tensor_data = (float *)(slot.trans_tensor->data);
         queue_results.send(res);
     }
 
@@ -1390,7 +1399,10 @@ struct server_context {
         task.s_layer = s_layer;
         task.e_layer = e_layer;
         task.token_id = json_value(task.data, "token_id", 0);
-        task.ggml_tensor_data = json_value(task.data, "ggml_tensor_data", nullptr);
+        // linjian : vector transform to pointer
+        std::vector<float> temp_vec;
+        task.ggml_tensor_data = (json_value(task.data, "ggml_tensor_data", temp_vec).data());
+        //task.ggml_tensor_data = json_value(task.data, "ggml_tensor_data", nullptr);
 
         // when a completion task's prompt array is not a singleton, we split it into multiple requests
         // otherwise, it's a single-prompt task, we actually queue it
@@ -1456,72 +1468,72 @@ struct server_context {
     void process_single_task(const server_task & task) {
         switch (task.type) {
             case SERVER_TASK_TYPE_COMPLETION:
-                {
-                    server_slot * slot = get_slot(json_value(task.data, "id_slot", -1));
-                    if (slot == nullptr) {
-                        // if no slot is available, we defer this task for processing later
-                        LOG_VERBOSE("no slot is available", {{"id_task", task.id}});
-                        queue_tasks.defer(task);
-                        break;
-                    }
+            {
+                server_slot * slot = get_slot(json_value(task.data, "id_slot", -1));
+                if (slot == nullptr) {
+                    // if no slot is available, we defer this task for processing later
+                    LOG_VERBOSE("no slot is available", {{"id_task", task.id}});
+                    queue_tasks.defer(task);
+                    break;
+                }
 
-                    if (task.data.contains("system_prompt")) {
-                        system_prompt_set(task.data["system_prompt"]);
-
-                        for (server_slot & slot : slots) {
-                            slot.n_past    = 0;
-                            slot.n_past_se = 0;
-                        }
-                    }
-
-                    slot->reset();
-
-                    slot->id_task   = task.id;
-                    slot->id_multi  = task.id_multi;
-                    slot->infill    = task.infill;
-                    slot->embedding = task.embedding;
-
-                    // jinyu: add inp_tensor
-                    slot->trans_tensor = task.trans_tensor;
-                    slot->s_layer = task.s_layer;
-                    slot->e_layer = task.e_layer;
-                    slot->sampled = task.token_id;
-                    slot->ggml_tensor_data = task.ggml_tensor_data;
-
-                    if (!launch_slot_with_data(*slot, task.data)) {
-                        // send error result
-                        send_error(task, "internal_error");
-                        break;
-                    }
-                } break;
-            case SERVER_TASK_TYPE_CANCEL:
-                {
-                    // release slot linked with the task id
-                    for (auto & slot : slots) {
-                        if (slot.id_task == task.id_target) {
-                            slot.release();
-                            break;
-                        }
-                    }
-                } break;
-            case SERVER_TASK_TYPE_NEXT_RESPONSE:
-                {
-                    // do nothing
-                } break;
-            case SERVER_TASK_TYPE_METRICS:
-                {
-                    json slots_data = json::array();
-
-                    int n_idle_slots       = 0;
-                    int n_processing_slots = 0;
+                if (task.data.contains("system_prompt")) {
+                    system_prompt_set(task.data["system_prompt"]);
 
                     for (server_slot & slot : slots) {
-                        json slot_data = get_formated_generation(slot);
-                        slot_data["id"]         = slot.id;
-                        slot_data["id_task"]    = slot.id_task;
-                        slot_data["state"]      = slot.state;
-                        slot_data["prompt"]     = slot.prompt;
-                        slot_data["next_token"] = {
+                        slot.n_past    = 0;
+                        slot.n_past_se = 0;
+                    }
+                }
+
+                slot->reset();
+
+                slot->id_task   = task.id;
+                slot->id_multi  = task.id_multi;
+                slot->infill    = task.infill;
+                slot->embedding = task.embedding;
+
+                // jinyu: add inp_tensor
+                slot->trans_tensor = task.trans_tensor;
+                slot->s_layer = task.s_layer;
+                slot->e_layer = task.e_layer;
+                slot->sampled = task.token_id;
+                slot->ggml_tensor_data = task.ggml_tensor_data;
+
+                if (!launch_slot_with_data(*slot, task.data)) {
+                    // send error result
+                    send_error(task, "internal_error");
+                    break;
+                }
+            } break;
+            case SERVER_TASK_TYPE_CANCEL:
+            {
+                // release slot linked with the task id
+                for (auto & slot : slots) {
+                    if (slot.id_task == task.id_target) {
+                        slot.release();
+                        break;
+                    }
+                }
+            } break;
+            case SERVER_TASK_TYPE_NEXT_RESPONSE:
+            {
+                // do nothing
+            } break;
+            case SERVER_TASK_TYPE_METRICS:
+            {
+                json slots_data = json::array();
+
+                int n_idle_slots       = 0;
+                int n_processing_slots = 0;
+
+                for (server_slot & slot : slots) {
+                    json slot_data = get_formated_generation(slot);
+                    slot_data["id"]         = slot.id;
+                    slot_data["id_task"]    = slot.id_task;
+                    slot_data["state"]      = slot.state;
+                    slot_data["prompt"]     = slot.prompt;
+                    slot_data["next_token"] = {
                             {"has_next_token", slot.has_next_token},
                             {"n_remain",       slot.n_remaining},
                             {"n_decoded",      slot.n_decoded},
@@ -1529,35 +1541,35 @@ struct server_context {
                             {"stopped_word",   slot.stopped_word},
                             {"stopped_limit",  slot.stopped_limit},
                             {"stopping_word",  slot.stopping_word},
-                        };
+                    };
 
-                        if (slot_data["state"] == SLOT_STATE_IDLE) {
-                            n_idle_slots++;
-                        } else {
-                            n_processing_slots++;
-                        }
-
-                        slots_data.push_back(slot_data);
+                    if (slot_data["state"] == SLOT_STATE_IDLE) {
+                        n_idle_slots++;
+                    } else {
+                        n_processing_slots++;
                     }
-                    LOG_INFO("slot data", {
-                        {"id_task",            task.id},
-                        {"n_idle_slots",       n_idle_slots},
-                        {"n_processing_slots", n_processing_slots}
-                    });
 
-                    LOG_VERBOSE("slot data", {
-                        {"id_task",            task.id},
-                        {"n_idle_slots",       n_idle_slots},
-                        {"n_processing_slots", n_processing_slots},
-                        {"slots",              slots_data}
-                    });
+                    slots_data.push_back(slot_data);
+                }
+                LOG_INFO("slot data", {
+                    {"id_task",            task.id},
+                    {"n_idle_slots",       n_idle_slots},
+                    {"n_processing_slots", n_processing_slots}
+                });
 
-                    server_task_result res;
-                    res.id       = task.id;
-                    res.id_multi = task.id_multi;
-                    res.stop     = true;
-                    res.error    = false;
-                    res.data     = {
+                LOG_VERBOSE("slot data", {
+                    {"id_task",            task.id},
+                    {"n_idle_slots",       n_idle_slots},
+                    {"n_processing_slots", n_processing_slots},
+                    {"slots",              slots_data}
+                });
+
+                server_task_result res;
+                res.id       = task.id;
+                res.id_multi = task.id_multi;
+                res.stop     = true;
+                res.error    = false;
+                res.data     = {
                         { "idle",                            n_idle_slots       },
                         { "processing",                      n_processing_slots },
                         { "deferred",                        queue_tasks.queue_tasks_deferred.size() },
@@ -1577,13 +1589,13 @@ struct server_context {
                         { "kv_cache_used_cells",             llama_get_kv_cache_used_cells(ctx)},
 
                         { "slots",                           slots_data },
-                    };
+                };
 
-                    if (json_value(task.data, "reset_bucket", false)) {
-                        metrics.reset_bucket();
-                    }
-                    queue_results.send(res);
-                } break;
+                if (json_value(task.data, "reset_bucket", false)) {
+                    metrics.reset_bucket();
+                }
+                queue_results.send(res);
+            } break;
         }
     }
 
@@ -1601,7 +1613,7 @@ struct server_context {
             result.error = result.error && subres.error;
         }
         result.data = json {
-            { "results", result_jsons }
+                { "results", result_jsons }
         };
 
         queue_results.send(result);
@@ -1657,7 +1669,7 @@ struct server_context {
                 return true;
             }
         }
-
+        // if there are multiple node, then we need comment the following code block
         if(e_layer-s_layer+1==n_layer)
         {
             LOG_VERBOSE("posting NEXT_RESPONSE", {});
@@ -2010,14 +2022,14 @@ struct server_context {
             int32_t i=0; // assume a batch
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
             llama_batch batch_view = {
-                n_tokens,
-                batch.token    + i,
-                nullptr,
-                batch.pos      + i,
-                batch.n_seq_id + i,
-                batch.seq_id   + i,
-                batch.logits   + i,
-                0, 0, 0, // unused
+                    n_tokens,
+                    batch.token    + i,
+                    nullptr,
+                    batch.pos      + i,
+                    batch.n_seq_id + i,
+                    batch.seq_id   + i,
+                    batch.logits   + i,
+                    0, 0, 0, // unused
             };
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
             for (auto& slot : slots) {
@@ -2077,9 +2089,9 @@ struct server_context {
 
                     for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
                         result.probs.push_back({
-                            cur_p.data[i].id,
-                            cur_p.data[i].p
-                        });
+                                                       cur_p.data[i].id,
+                                                       cur_p.data[i].p
+                                               });
                     }
 
                     if (!process_token(result, slot)) {
@@ -2135,18 +2147,18 @@ struct server_context {
             }
 
             llama_batch batch_view = {
-                n_tokens,
-                batch.token    + i,
-                nullptr,
-                batch.pos      + i,
-                batch.n_seq_id + i,
-                batch.seq_id   + i,
-                batch.logits   + i,
-                0, 0, 0, // unused
+                    n_tokens,
+                    batch.token    + i,
+                    nullptr,
+                    batch.pos      + i,
+                    batch.n_seq_id + i,
+                    batch.seq_id   + i,
+                    batch.logits   + i,
+                    0, 0, 0, // unused
             };
 
             //jinyu: set the start_layer and end_layer into ctx
-            //jinyu TODO: need to classify the first node and other node because of batching!!! 
+            //jinyu TODO: need to classify the first node and other node because of batching!!!
             int s_layer,e_layer;
             struct ggml_tensor* trans_tensor;
             float* ggml_tensor_data;
@@ -2220,9 +2232,9 @@ struct server_context {
 
                     for (size_t i = 0; i < std::min(cur_p.size, (size_t) n_probs); ++i) {
                         result.probs.push_back({
-                            cur_p.data[i].id,
-                            cur_p.data[i].p
-                        });
+                                                       cur_p.data[i].id,
+                                                       cur_p.data[i].p
+                                               });
                     }
 
                     if (!process_token(result, slot)) {
@@ -2244,12 +2256,12 @@ struct server_context {
 
     json model_meta() const {
         return json {
-            {"vocab_type",  llama_vocab_type    (model)},
-            {"n_vocab",     llama_n_vocab       (model)},
-            {"n_ctx_train", llama_n_ctx_train   (model)},
-            {"n_embd",      llama_n_embd        (model)},
-            {"n_params",    llama_model_n_params(model)},
-            {"size",        llama_model_size    (model)},
+                {"vocab_type",  llama_vocab_type    (model)},
+                {"n_vocab",     llama_n_vocab       (model)},
+                {"n_ctx_train", llama_n_ctx_train   (model)},
+                {"n_embd",      llama_n_embd        (model)},
+                {"n_params",    llama_model_n_params(model)},
+                {"size",        llama_model_size    (model)},
         };
     }
 };
@@ -2383,9 +2395,9 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
             }
             std::string key;
             while (std::getline(key_file, key)) {
-               if (key.size() > 0) {
-                   sparams.api_keys.push_back(key);
-               }
+                if (key.size() > 0) {
+                    sparams.api_keys.push_back(key);
+                }
             }
             key_file.close();
         } else if (arg == "--timeout" || arg == "-to") {
@@ -2521,9 +2533,9 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
                 params.n_gpu_layers = std::stoi(argv[i]);
             } else {
                 LOG_WARNING(
-                    "Not compiled with GPU offload support, --n-gpu-layers option will be ignored. "
-                    "See main README.md for information on enabling GPU BLAS support",
-                    {{"n_gpu_layers", params.n_gpu_layers}});
+                        "Not compiled with GPU offload support, --n-gpu-layers option will be ignored. "
+                        "See main README.md for information on enabling GPU BLAS support",
+                        {{"n_gpu_layers", params.n_gpu_layers}});
             }
         } else if (arg == "--split-mode" || arg == "-sm") {
             if (++i >= argc) {
@@ -2550,7 +2562,7 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
                 break;
             }
 #if defined(GGML_USE_CUBLAS) || defined(GGML_USE_SYCL)
-            std::string arg_next = argv[i];
+                std::string arg_next = argv[i];
 
             // split string by , and /
             const std::regex regex{R"([,/]+)"};
@@ -2574,7 +2586,7 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
                 break;
             }
 #if defined(GGML_USE_CUBLAS) || defined(GGML_USE_SYCL)
-            params.main_gpu = std::stoi(argv[i]);
+                params.main_gpu = std::stoi(argv[i]);
 #else
             LOG_WARNING("llama.cpp was compiled without cuBLAS. It is not possible to set a main GPU.", {});
 #endif
@@ -2653,9 +2665,9 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
             }
             std::string system_prompt;
             std::copy(
-                std::istreambuf_iterator<char>(file),
-                std::istreambuf_iterator<char>(),
-                std::back_inserter(system_prompt)
+                    std::istreambuf_iterator<char>(file),
+                    std::istreambuf_iterator<char>(),
+                    std::back_inserter(system_prompt)
             );
             sparams.system_prompt = system_prompt;
         } else if (arg == "-ctk" || arg == "--cache-type-k") {
@@ -2845,54 +2857,54 @@ int main(int argc, char ** argv) {
         server_state current_state = state.load();
         switch (current_state) {
             case SERVER_STATE_READY:
-                {
-                    // request slots data using task queue
-                    server_task task;
-                    task.id   = ctx_server.queue_tasks.get_new_id();
-                    task.type = SERVER_TASK_TYPE_METRICS;
-                    task.id_target = -1;
+            {
+                // request slots data using task queue
+                server_task task;
+                task.id   = ctx_server.queue_tasks.get_new_id();
+                task.type = SERVER_TASK_TYPE_METRICS;
+                task.id_target = -1;
 
-                    ctx_server.queue_results.add_waiting_task_id(task.id);
-                    ctx_server.queue_tasks.post(task);
+                ctx_server.queue_results.add_waiting_task_id(task.id);
+                ctx_server.queue_tasks.post(task);
 
-                    // get the result
-                    server_task_result result = ctx_server.queue_results.recv(task.id);
-                    ctx_server.queue_results.remove_waiting_task_id(task.id);
+                // get the result
+                server_task_result result = ctx_server.queue_results.recv(task.id);
+                ctx_server.queue_results.remove_waiting_task_id(task.id);
 
-                    const int n_idle_slots       = result.data["idle"];
-                    const int n_processing_slots = result.data["processing"];
+                const int n_idle_slots       = result.data["idle"];
+                const int n_processing_slots = result.data["processing"];
 
-                    json health = {
+                json health = {
                         {"status",           "ok"},
                         {"slots_idle",       n_idle_slots},
                         {"slots_processing", n_processing_slots}
-                    };
+                };
 
-                    res.status = 200; // HTTP OK
-                    if (sparams.slots_endpoint && req.has_param("include_slots")) {
-                        health["slots"] = result.data["slots"];
-                    }
-
-                    if (n_idle_slots == 0) {
-                        health["status"] = "no slot available";
-                        if (req.has_param("fail_on_no_slot")) {
-                            res.status = 503; // HTTP Service Unavailable
-                        }
-                    }
-
-                    res.set_content(health.dump(), "application/json");
-                    break;
+                res.status = 200; // HTTP OK
+                if (sparams.slots_endpoint && req.has_param("include_slots")) {
+                    health["slots"] = result.data["slots"];
                 }
+
+                if (n_idle_slots == 0) {
+                    health["status"] = "no slot available";
+                    if (req.has_param("fail_on_no_slot")) {
+                        res.status = 503; // HTTP Service Unavailable
+                    }
+                }
+
+                res.set_content(health.dump(), "application/json");
+                break;
+            }
             case SERVER_STATE_LOADING_MODEL:
-                {
-                    res.set_content(R"({"status": "loading model"})", "application/json");
-                    res.status = 503; // HTTP Service Unavailable
-                } break;
+            {
+                res.set_content(R"({"status": "loading model"})", "application/json");
+                res.status = 503; // HTTP Service Unavailable
+            } break;
             case SERVER_STATE_ERROR:
-                {
-                    res.set_content(R"({"status": "error", "error": "Model failed to load"})", "application/json");
-                    res.status = 500; // HTTP Internal Server Error
-                } break;
+            {
+                res.set_content(R"({"status": "error", "error": "Model failed to load"})", "application/json");
+                res.status = 500; // HTTP Internal Server Error
+            } break;
         }
     });
 
@@ -2946,48 +2958,48 @@ int main(int argc, char ** argv) {
 
             // metrics definition: https://prometheus.io/docs/practices/naming/#metric-names
             json all_metrics_def = json {
-                {"counter", {{
-                        {"name",  "prompt_tokens_total"},
-                        {"help",  "Number of prompt tokens processed."},
-                        {"value",  (uint64_t) data["n_prompt_tokens_processed_total"]}
-                }, {
-                        {"name",  "prompt_seconds_total"},
-                        {"help",  "Prompt process time"},
-                        {"value",  (uint64_t) data["t_prompt_processing_total"] / 1.e3}
-                }, {
-                        {"name",  "tokens_predicted_total"},
-                        {"help",  "Number of generation tokens processed."},
-                        {"value",  (uint64_t) data["n_tokens_predicted_total"]}
-                }, {
-                        {"name",  "tokens_predicted_seconds_total"},
-                        {"help",  "Predict process time"},
-                        {"value",  (uint64_t) data["t_tokens_generation_total"] / 1.e3}
-                }}},
-                {"gauge", {{
-                        {"name",  "prompt_tokens_seconds"},
-                        {"help",  "Average prompt throughput in tokens/s."},
-                        {"value",  n_prompt_tokens_processed ? 1.e3 / t_prompt_processing * n_prompt_tokens_processed : 0.}
-                },{
-                        {"name",  "predicted_tokens_seconds"},
-                        {"help",  "Average generation throughput in tokens/s."},
-                        {"value",  n_tokens_predicted ? 1.e3 / t_tokens_generation * n_tokens_predicted : 0.}
-                },{
-                        {"name",  "kv_cache_usage_ratio"},
-                        {"help",  "KV-cache usage. 1 means 100 percent usage."},
-                        {"value",  1. * kv_cache_used_cells / params.n_ctx}
-                },{
-                        {"name",  "kv_cache_tokens"},
-                        {"help",  "KV-cache tokens."},
-                        {"value",  (uint64_t) data["kv_cache_tokens_count"]}
-                },{
-                        {"name",  "requests_processing"},
-                        {"help",  "Number of request processing."},
-                        {"value",  (uint64_t) data["processing"]}
-                },{
-                        {"name",  "requests_deferred"},
-                        {"help",  "Number of request deferred."},
-                        {"value",  (uint64_t) data["deferred"]}
-                }}}
+                    {"counter", {{
+                                         {"name",  "prompt_tokens_total"},
+                                         {"help",  "Number of prompt tokens processed."},
+                                         {"value",  (uint64_t) data["n_prompt_tokens_processed_total"]}
+                                 }, {
+                                            {"name",  "prompt_seconds_total"},
+                                            {"help",  "Prompt process time"},
+                                            {"value",  (uint64_t) data["t_prompt_processing_total"] / 1.e3}
+                                    }, {
+                                               {"name",  "tokens_predicted_total"},
+                                               {"help",  "Number of generation tokens processed."},
+                                               {"value",  (uint64_t) data["n_tokens_predicted_total"]}
+                                       }, {
+                                                  {"name",  "tokens_predicted_seconds_total"},
+                                                  {"help",  "Predict process time"},
+                                                  {"value",  (uint64_t) data["t_tokens_generation_total"] / 1.e3}
+                                          }}},
+                    {"gauge", {{
+                                         {"name",  "prompt_tokens_seconds"},
+                                         {"help",  "Average prompt throughput in tokens/s."},
+                                         {"value",  n_prompt_tokens_processed ? 1.e3 / t_prompt_processing * n_prompt_tokens_processed : 0.}
+                                 },{
+                                            {"name",  "predicted_tokens_seconds"},
+                                            {"help",  "Average generation throughput in tokens/s."},
+                                            {"value",  n_tokens_predicted ? 1.e3 / t_tokens_generation * n_tokens_predicted : 0.}
+                                    },{
+                                               {"name",  "kv_cache_usage_ratio"},
+                                               {"help",  "KV-cache usage. 1 means 100 percent usage."},
+                                               {"value",  1. * kv_cache_used_cells / params.n_ctx}
+                                       },{
+                                                  {"name",  "kv_cache_tokens"},
+                                                  {"help",  "KV-cache tokens."},
+                                                  {"value",  (uint64_t) data["kv_cache_tokens_count"]}
+                                          },{
+                                                    {"name",  "requests_processing"},
+                                                    {"help",  "Number of request processing."},
+                                                    {"value",  (uint64_t) data["processing"]}
+                                            },{
+                                                      {"name",  "requests_deferred"},
+                                                      {"help",  "Number of request deferred."},
+                                                      {"value",  (uint64_t) data["deferred"]}
+                                              }}}
             };
 
             std::stringstream prometheus;
@@ -3142,10 +3154,10 @@ int main(int argc, char ** argv) {
     svr.Get("/props", [&ctx_server](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         json data = {
-            { "user_name",                   ctx_server.name_user.c_str() },
-            { "assistant_name",              ctx_server.name_assistant.c_str() },
-            { "default_generation_settings", ctx_server.default_generation_settings_for_props },
-            { "total_slots",                 ctx_server.params.n_parallel }
+                { "user_name",                   ctx_server.name_user.c_str() },
+                { "assistant_name",              ctx_server.name_assistant.c_str() },
+                { "default_generation_settings", ctx_server.default_generation_settings_for_props },
+                { "total_slots",                 ctx_server.params.n_parallel }
         };
 
         res.set_content(data.dump(), "application/json; charset=utf-8");
@@ -3180,9 +3192,9 @@ int main(int argc, char ** argv) {
                     server_task_result result = ctx_server.queue_results.recv(id_task);
                     if (!result.error) {
                         const std::string str =
-                            "data: " +
-                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                            "\n\n";
+                                "data: " +
+                                result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                                "\n\n";
 
                         LOG_VERBOSE("data stream", {
                             { "to_send", str }
@@ -3198,9 +3210,9 @@ int main(int argc, char ** argv) {
                         }
                     } else {
                         const std::string str =
-                            "error: " +
-                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                            "\n\n";
+                                "error: " +
+                                result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                                "\n\n";
 
                         LOG_VERBOSE("data stream", {
                             { "to_send", str }
@@ -3231,7 +3243,6 @@ int main(int argc, char ** argv) {
         }
     };
 
-    svr.Post("/completion", completions); // legacy
     svr.Post("/completions", completions);
     svr.Post("/v1/completions", completions);
 
@@ -3248,107 +3259,301 @@ int main(int argc, char ** argv) {
      *     float* vecPtr = output_json['ggml_tensor_data'].data();
      *     ggml_tensor->data = (void*)(vecPtr);
      */
-    const auto masternode_schedule = [&validate_api_key](const httplib::Request & req, httplib::Response & res){
+//    const auto masternode_schedule = [&validate_api_key](const httplib::Request & req, httplib::Response & res){
+//        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+//        if (!validate_api_key(req, res)) {
+//            return;
+//        }
+//        // store start layer index and end layer index and currently set up manually
+//        // TODO： need a model layer devided strategy
+//        std::vector<std::string> vec_worknode_ipaddress;
+//        vec_worknode_ipaddress.push_back("http://127.0.0.1:8081");
+//        vec_worknode_ipaddress.push_back("http://127.0.0.1:8082");
+//        std::vector<std::pair<int, int>> vec_worknode_layer_index;
+//        vec_worknode_layer_index.push_back(std::make_pair(0,31));
+//        vec_worknode_layer_index.push_back(std::make_pair(3,4));
+//
+//        json input_json;
+//        json output_json;
+//
+//        // worknode output content
+//        int token_id = 0;
+//        int slot_id = -1;
+//        bool stop = false;
+//        // ggml_tensor->data: std::vector<float> vector_data
+//
+//        // user requrest content
+//        std::string prompt = req.body;
+//        // worknode response content
+//        std::string response_str = "";
+//
+//
+//        const auto chunked_content_provider = [&](size_t, httplib::DataSink & sink){
+//            while (true) {
+//                //for (int i = 0; i < vec_worknode_layer_index.size(); i++) {
+//                for (int i = 0; i < 1; i++) {
+//                    if (i == 0) {
+//                        // initialize json data, and transform json to json string
+//                        std::vector<float> vector_data;
+//                        input_json = {
+//                                {"prompt",           prompt},
+//                                {"s_layer",          vec_worknode_layer_index[i].first},
+//                                {"e_layer",          vec_worknode_layer_index[i].second},
+//                                {"ggml_tensor_data", vector_data},
+//                                {"token_id",         token_id},
+//                                {"slot_id",          slot_id}
+//                        };
+//                        std::string input = input_json.dump();
+//
+//                        // send post request to worknode
+//                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
+//                        auto forwarded_res = cli.Post("/masternode_schedule", input, "application/json; charset=utf-8");
+//                        response_str = forwarded_res->body;
+//
+//
+//                    } else {
+//                        slot_id = output_json["slot_id"];
+//                        std::vector<float> vector_data = output_json["vector_data"];
+//                        input_json = {
+//                                {"prompt",           prompt},
+//                                {"s_layer",          vec_worknode_layer_index[i].first},
+//                                {"e_layer",          vec_worknode_layer_index[i].second},
+//                                {"ggml_tensor_data", vector_data},
+//                                {"token_id",         token_id},
+//                                {"slot_id",          slot_id}
+//                        };
+//                        std::string input = input_json.dump();
+//
+//                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
+//                        auto forwarded_res = cli.Post("/masternode_schedule", input, "application/json; charset=utf-8");
+//                        response_str = forwarded_res->body;
+//
+//                    }
+//                    output_json = json::parse(response_str);
+//
+//                }
+//                sink.write(response_str.c_str(), response_str.size());
+//                stop = output_json["stop"];
+//                token_id = output_json["token_id"];
+//                if (stop) {
+//                    break;
+//                }
+//            }
+//            sink.done();
+//            return true;
+//        };
+//        res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
+//
+//    };
+
+    const auto handle_worknode_initialize = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
         }
-        // store start layer index and end layer index and currently set up manually
-        // TODO： need a model layer devided strategy
-        std::vector<std::string> vec_worknode_ipaddress;
-        vec_worknode_ipaddress.push_back("http://127.0.0.1:8081");
-        vec_worknode_ipaddress.push_back("http://127.0.0.1:8082");
-        std::vector<std::pair<int, int>> vec_worknode_layer_index;
-        vec_worknode_layer_index.push_back(std::make_pair(1,2));
-        vec_worknode_layer_index.push_back(std::make_pair(3,4));
 
-        json input_json;
-        json output_json;
+        json data_input = json::parse(req.body);
+        std::string stri = data_input["prompt"];
+        json data = json::parse(stri);
 
-        // worknode output content
-        int token_id = -1;
-        int slot_id = -1;
-        bool stop = false;
-        // ggml_tensor->data: std::vector<float> vector_data
+        const int id_task = ctx_server.queue_tasks.get_new_id();
 
-        // user requrest content
-        std::string prompt = req.body;
-        // worknode response content
-        std::string response_str = "";
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+        ctx_server.request_completion(id_task, -1, data, false, false);
 
-
-        const auto chunked_content_provider = [&](size_t, httplib::DataSink & sink){
-            while (true) {
-                for (int i = 0; i < vec_worknode_layer_index.size(); i++) {
-                    if (i == 0) {
-                        // initialize json data, and transform json to json string
-                        std::vector<float> vector_data;
-                        input_json = {
-                                {"prompt",           prompt},
-                                {"s_layer",          vec_worknode_layer_index[i].first},
-                                {"e_layer",          vec_worknode_layer_index[i].second},
-                                {"ggml_tensor_data", vector_data},
-                                {"token_id",         token_id},
-                                {"slot_id",          slot_id}
-                        };
-                        std::string input = input_json.dump();
-
-                        // send post request to worknode
-                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
-                        auto forwarded_res = cli.Post("/completion", input, "application/json; charset=utf-8");
-                        response_str = forwarded_res->body;
-
-
-                    } else {
-                        slot_id = output_json["slot_id"];
-                        std::vector<float> vector_data = output_json["vector_data"];
-                        input_json = {
-                                {"prompt",           prompt},
-                                {"s_layer",          vec_worknode_layer_index[i].first},
-                                {"e_layer",          vec_worknode_layer_index[i].second},
-                                {"ggml_tensor_data", vector_data},
-                                {"token_id",         token_id},
-                                {"slot_id",          slot_id}
-                        };
-                        std::string input = input_json.dump();
-
-                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
-                        auto forwarded_res = cli.Post("/completion", input, "application/json; charset=utf-8");
-                        response_str = forwarded_res->body;
-
-                    }
-                    output_json = json::parse(response_str);
-
+        if (data_input["e_layer"] == 31){
+            if (!json_value(data, "stream", false)) {
+                server_task_result result = ctx_server.queue_results.recv(id_task);
+                if (!result.error && result.stop) {
+                    res.set_content(result.data.dump(-1, ' ', false, json::error_handler_t::replace), "application/json; charset=utf-8");
                 }
-                sink.write(response_str.c_str(), response_str.size());
-                stop = output_json["stop"];
-                token_id = output_json["token_id"];
-                if (stop) {
-                    break;
+
+                ctx_server.queue_results.remove_waiting_task_id(id_task);
+            } else {
+                server_task_result result = ctx_server.queue_results.recv(id_task);
+                if (!result.error) {
+                    const std::string str =
+                            "data: " +
+                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                            "\n\n";
+
+                    LOG_VERBOSE("data stream", {
+                        { "to_send", str }
+                    });
+
+                    httplib::Client cli("http://127.0.0.1:8080");
+                    auto forwarded_res = cli.Post("/masternode_passing", str, "text/plain");
+                }
+
+                res.set_content("passing success!","text/plain");
+            }
+        }else {
+            server_task_result result = ctx_server.queue_results.recv(id_task);
+            std::vector<float> vector_data = result.ggml_tensor_data;
+            json input_json;
+            input_json = {
+                    {"prompt",           data_input["prompt"]},
+                    {"s_layer",          16},
+                    {"e_layer",          31},
+                    {"ggml_tensor_data", vector_data},
+                    {"token_id",         0},
+                    {"slot_id",          -1}
+            };
+            std::string input = input_json.dump();
+
+            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json; charset=utf-8");
+        }
+
+    };
+
+    // linjian : add masternode schedule
+    const auto handle_completions = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+        json input_json;
+        std::vector<float> vector_data;
+        input_json = {
+                {"prompt",           req.body},
+                {"s_layer",          0},
+                {"e_layer",          15},
+                {"ggml_tensor_data", vector_data},
+                {"token_id",         0},
+                {"slot_id",          -1},
+                {"token",     ""}
+        };
+        std::string input = input_json.dump();
+
+        // pass post request.body to worknode 1, and add some new inforation into input
+        httplib::Client cli("http://127.0.0.1:8081"); // worknode1 ip address and port
+        auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
+
+//        httplib::Client cli("http://127.0.0.1:8081"); // worknode ip address and port
+//        auto forwarded_res = cli.Post("/worknode", req.body, "application/json");// only send the original prompt
+
+        const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
+            while (true) {
+                std::string str = "";
+                //blocking until receive new result
+                while(true) {
+                    if(!ctx_server.results_vector.empty()) {
+                        str = ctx_server.results_vector[0];
+                        ctx_server.results_vector.erase(ctx_server.results_vector.begin());
+                        std::cout<<int(ctx_server.results_vector.size());
+                        break;
+                    }
+                }
+                if(str != "") {
+                    sink.write(str.c_str(), str.size());
                 }
             }
             sink.done();
             return true;
         };
         res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
-
     };
-    svr.Post("/masternode_schedule", masternode_schedule);
+
+
+    // receive the token of final worknode, the store result to masternode outputstream and pass new content to first worknode
+    const auto handle_masternode_passing= [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+        json data_input = json::parse(req.body);
+        std::string token = data_input["token"];
+        ctx_server.results_vector.push_back(token); //store result token
+        httplib::Client cli("http://127.0.0.1:8081");
+        auto forwarded_res = cli.Post("/worknode_notify", req.body, "application/json");
+
+        res.set_content("passing success!","text/plain");
+    };
+
+    const auto handle_worknode_notify= [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+
+        {
+            LOG_VERBOSE("posting NEXT_RESPONSE", {});
+
+            server_task task;
+            task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
+            task.id_target = -1;
+
+            ctx_server.queue_tasks.post(task);
+        }
+
+        json data_input = json::parse(req.body);
+        std::string stri = data_input["prompt"];
+        json data = json::parse(stri);
+
+        int id_task = 0;
+        if (data_input["e_layer"] == 31) {
+            server_task_result result = ctx_server.queue_results.recv(id_task);
+            if (!result.error) {
+                const std::string str =
+                        "data: " +
+                        result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                        "\n\n";
+
+                LOG_VERBOSE("data stream", {
+                    { "to_send", str }
+                });
+                httplib::Client cli("http://127.0.0.1:8080");
+                auto forwarded_res = cli.Post("/masternode_passing", str, "text/plain");
+            }
+            res.set_content("start worknode success!", "text/plain");
+        }else {
+            server_task_result result = ctx_server.queue_results.recv(id_task);
+            std::vector<float> vector_data = result.ggml_tensor_data;
+            json input_json;
+            input_json = {
+                    {"prompt",           data_input["prompt"]},
+                    {"s_layer",          16},
+                    {"e_layer",          31},
+                    {"ggml_tensor_data", vector_data},
+                    {"token_id",         0},
+                    {"slot_id",          -1},
+                    {"token",            ""}
+            };
+            std::string input = input_json.dump();
+
+            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            auto forwarded_res = cli.Post("/handle_worknode_notify", input, "application/json; charset=utf-8");
+        }
+    };
+
+    // worknode post processing functions
+    svr.Post("/worknode_initialize",        handle_worknode_initialize);
+    svr.Post("/worknode_notify",            handle_worknode_notify);
+
+    // masternode post processing functions
+    svr.Post("/masternode_passing",         handle_masternode_passing);
+    // if you want to start llama cpp by multiple node
+
+    //svr.Post("/completion",          handle_completions);
+
+    // if you want to start llama cpp by single node
+    svr.Post("/completion", completions);
 
     svr.Get("/v1/models", [&params, &model_meta](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
 
         json models = {
-            {"object", "list"},
-            {"data", {
-                 {
-                     {"id",       params.model_alias},
-                     {"object",   "model"},
-                     {"created",  std::time(0)},
-                     {"owned_by", "llamacpp"},
-                     {"meta",     model_meta}
-                 },
-             }}
+                {"object", "list"},
+                {"data", {
+                                   {
+                                           {"id",       params.model_alias},
+                                           {"object",   "model"},
+                                           {"created",  std::time(0)},
+                                           {"owned_by", "llamacpp"},
+                                           {"meta",     model_meta}
+                                   },
+                           }}
         };
 
         res.set_content(models.dump(), "application/json; charset=utf-8");
@@ -3389,9 +3594,9 @@ int main(int argc, char ** argv) {
                         for (auto it = result_array.begin(); it != result_array.end(); ++it) {
                             if (!it->empty()) {
                                 const std::string str =
-                                    "data: " +
-                                    it->dump(-1, ' ', false, json::error_handler_t::replace) +
-                                    "\n\n";
+                                        "data: " +
+                                        it->dump(-1, ' ', false, json::error_handler_t::replace) +
+                                        "\n\n";
                                 LOG_VERBOSE("data stream", {{"to_send", str}});
                                 if (!sink.write(str.c_str(), str.size())) {
                                     ctx_server.queue_results.remove_waiting_task_id(id_task);
@@ -3404,9 +3609,9 @@ int main(int argc, char ** argv) {
                         }
                     } else {
                         const std::string str =
-                            "error: " +
-                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                            "\n\n";
+                                "error: " +
+                                result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                                "\n\n";
                         LOG_VERBOSE("data stream", {{"to_send", str}});
                         if (!sink.write(str.c_str(), str.size())) {
                             ctx_server.queue_results.remove_waiting_task_id(id_task);
@@ -3462,9 +3667,9 @@ int main(int argc, char ** argv) {
                     server_task_result result = ctx_server.queue_results.recv(id_task);
                     if (!result.error) {
                         const std::string str =
-                            "data: " +
-                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                            "\n\n";
+                                "data: " +
+                                result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                                "\n\n";
 
                         LOG_VERBOSE("data stream", {
                             { "to_send", str }
@@ -3586,9 +3791,9 @@ int main(int argc, char ** argv) {
                     ctx_server.queue_results.remove_waiting_task_id(id_task);
 
                     json embedding = json{
-                        {"embedding", json_value(result.data, "embedding", json::array())},
-                        {"index",     i++},
-                        {"object",    "embedding"}
+                            {"embedding", json_value(result.data, "embedding", json::array())},
+                            {"index",     i++},
+                            {"object",    "embedding"}
                     };
 
                     data.push_back(embedding);
@@ -3613,10 +3818,10 @@ int main(int argc, char ** argv) {
         ctx_server.queue_results.remove_waiting_task_id(id_task);
 
         json data = json::array({json{
-            {"embedding", json_value(result.data, "embedding", json::array())},
-            {"index",     0},
-            {"object",    "embedding"}
-        }}
+                                        {"embedding", json_value(result.data, "embedding", json::array())},
+                                        {"index",     0},
+                                        {"object",    "embedding"}
+                                }}
         );
 
         json root = format_embeddings_response_oaicompat(body, data);
@@ -3644,17 +3849,17 @@ int main(int argc, char ** argv) {
     });
 
     ctx_server.queue_tasks.on_new_task(std::bind(
-        &server_context::process_single_task, &ctx_server, std::placeholders::_1));
+            &server_context::process_single_task, &ctx_server, std::placeholders::_1));
     ctx_server.queue_tasks.on_finish_multitask(std::bind(
-        &server_context::on_finish_multitask, &ctx_server, std::placeholders::_1));
+            &server_context::on_finish_multitask, &ctx_server, std::placeholders::_1));
     ctx_server.queue_tasks.on_run_slots(std::bind(
-        &server_context::update_slots, &ctx_server));
+            &server_context::update_slots, &ctx_server));
     ctx_server.queue_results.on_multitask_update(std::bind(
-        &server_queue::update_multitask,
-        &ctx_server.queue_tasks,
-        std::placeholders::_1,
-        std::placeholders::_2,
-        std::placeholders::_3
+            &server_queue::update_multitask,
+            &ctx_server.queue_tasks,
+            std::placeholders::_1,
+            std::placeholders::_2,
+            std::placeholders::_3
     ));
 
     shutdown_handler = [&](int) {
