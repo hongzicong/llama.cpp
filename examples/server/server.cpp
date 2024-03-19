@@ -78,7 +78,9 @@ struct server_task {
     int s_layer;
     int e_layer;
     llama_token token_id;
-    float* ggml_tensor_data;
+    std::vector<float> ggml_tensor_data;
+    //linjian: add atrribute
+    int slot_id;
 };
 
 struct server_task_result {
@@ -146,7 +148,7 @@ struct server_slot {
     struct ggml_tensor* trans_tensor;
     int s_layer;
     int e_layer;
-    float* ggml_tensor_data;
+    std::vector<float> ggml_tensor_data;
 
     // used to determine the slot that has been used the longest
     int64_t t_last_used = -1;
@@ -666,6 +668,8 @@ struct server_context {
     server_metrics metrics;
 
     std::vector<std::string> results_vector;
+    bool stop = false;
+    int task_id = -1;
 
     ~server_context() {
         if (ctx) {
@@ -813,6 +817,17 @@ struct server_context {
         }
 
         return last_used;
+    }
+
+    //linjian: reuse corresponding slot
+    server_slot * get_corresponding_slot(int id) {
+        server_slot * null_slot = nullptr;
+        for (server_slot &slot: slots) {
+            if (slot.id == id) {
+                return &slot;
+            }
+        }
+        return null_slot;
     }
 
     bool launch_slot_with_data(server_slot & slot, json data) const {
@@ -1247,7 +1262,8 @@ struct server_context {
             {"content",    tkn.text_to_send},
             {"stop",       false},
             {"id_slot",    slot.id},
-            {"multimodal", false}
+            {"multimodal", false},
+            {"token_id",    slot.sampled}
         };
 
         if (slot.sparams.n_probs > 0) {
@@ -1398,7 +1414,7 @@ struct server_context {
         task.token_id = json_value(task.data, "token_id", 0);
         // linjian : vector transform to pointer
         std::vector<float> temp_vec;
-        task.ggml_tensor_data = (json_value(task.data, "ggml_tensor_data", temp_vec).data());
+        task.ggml_tensor_data = (json_value(task.data, "ggml_tensor_data", temp_vec));
         //task.ggml_tensor_data = json_value(task.data, "ggml_tensor_data", nullptr);
 
         // when a completion task's prompt array is not a singleton, we split it into multiple requests
@@ -1515,7 +1531,9 @@ struct server_context {
                 } break;
             case SERVER_TASK_TYPE_NEXT_RESPONSE:
                 {
-                    // do nothing
+                    server_slot * slot = get_corresponding_slot(task.slot_id);
+                    slot->sampled = task.token_id;
+                    slot->ggml_tensor_data = task.ggml_tensor_data;
                 } break;
             case SERVER_TASK_TYPE_METRICS:
                 {
@@ -1667,16 +1685,16 @@ struct server_context {
             }
         }
         // if there are multiple node, then we need comment the following code block
-        if(e_layer-s_layer+1==n_layer)
-        {
-            LOG_VERBOSE("posting NEXT_RESPONSE", {});
-
-            server_task task;
-            task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
-            task.id_target = -1;
-
-            queue_tasks.post(task);
-        }
+//        if(e_layer-s_layer+1==n_layer)
+//        {
+//            LOG_VERBOSE("posting NEXT_RESPONSE", {});
+//
+//            server_task task;
+//            task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
+//            task.id_target = -1;
+//
+//            queue_tasks.post(task);
+//        }
 
         // apply context-shift if needed
         // TODO: simplify and improve
@@ -2006,7 +2024,7 @@ struct server_context {
         //jinyu: different processing methods for different node
         //start---
         struct ggml_tensor* trans_tensor;
-        float* ggml_tensor_data;
+        std::vector<float> ggml_tensor_data;
         for (auto& slot : slots) {
             s_layer = slot.s_layer;
             e_layer = slot.e_layer;
@@ -2014,9 +2032,11 @@ struct server_context {
             ggml_tensor_data = slot.ggml_tensor_data;
             break;
         }
-        if(s_layer!=0){  // start from node 2, we neglect the batching
-            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor, ggml_tensor_data);  // assign three values to attributes of ctx
-            int32_t i=0; // assume a batch
+        if (s_layer != 0) {  // start from node 2, we neglect the batching
+            llama_set_s_e_inference(ctx, s_layer, e_layer, trans_tensor, ggml_tensor_data.data());  // assign three values to attributes of ctx
+            if (e_layer + 1 != n_layer)
+                llama_set_return_res(ctx);
+            int32_t i = 0; // assume a batch
             const int32_t n_tokens = std::min(n_batch, batch.n_tokens - i);
             llama_batch batch_view = {
                     n_tokens,
@@ -2158,7 +2178,7 @@ struct server_context {
             //jinyu TODO: need to classify the first node and other node because of batching!!!
             int s_layer,e_layer;
             struct ggml_tensor* trans_tensor;
-            float* ggml_tensor_data;
+            std::vector<float> ggml_tensor_data;
             for (auto& slot : slots) {
                 s_layer = slot.s_layer;
                 e_layer = slot.e_layer;
@@ -2166,7 +2186,9 @@ struct server_context {
                 ggml_tensor_data = slot.ggml_tensor_data;
                 break;
             }
-            llama_set_s_e_inference(ctx, s_layer,e_layer, trans_tensor, ggml_tensor_data);  // assign three values to attributes of ctx
+            llama_set_s_e_inference(ctx, s_layer, e_layer, trans_tensor, ggml_tensor_data.data());  // assign three values to attributes of ctx
+            if (e_layer + 1 != n_layer)
+                llama_set_return_res(ctx);
 
             const int ret = llama_decode(ctx, batch_view); // jinyu: return in ctx
 
@@ -3165,7 +3187,14 @@ int main(int argc, char ** argv) {
         if (!validate_api_key(req, res)) {
             return;
         }
-
+        //linjian: is the error due to a forward request
+//        std::string str1 = "{\"api_key\":\"\",\"cache_prompt\":true,\"e_layer\":15,\"frequency_penalty\":0,\"ggml_tensor_data\":[],\"grammar\":\"\",\"image_data\":[],\"min_p\":0.05,\"mirostat\":0,\"mirostat_eta\":0.1,\"mirostat_tau\":5,\"n_predict\":400,\"n_probs\":0,\"presence_penalty\":0,\"prompt\":\"undefined: hello\",\"repeat_last_n\":256,\"repeat_penalty\":1.18,\"s_layer\":0,\"slot_id\":-1,\"stop\":[\"</s>\",\"Llama:\",\"User:\"],\"stream\":true,\"temperature\":0.7,\"tfs_z\":1,\"token\":\"\",\"token_id\":0,\"top_k\":40,\"top_p\":0.95,\"typical_p\":1}";
+//        std::string str2 = "{\"stream\":true,\"n_predict\":400,\"temperature\":0.7,\"stop\":[\"</s>\",\"Llama:\",\"User:\"],\"repeat_last_n\":256,\"repeat_penalty\":1.18,\"top_k\":40,\"top_p\":0.95,\"min_p\":0.05,\"tfs_z\":1,\"typical_p\":1,\"presence_penalty\":0,\"frequency_penalty\":0,\"mirostat\":0,\"mirostat_tau\":5,\"mirostat_eta\":0.1,\"grammar\":\"\",\"n_probs\":0,\"image_data\":[],\"cache_prompt\":true,\"api_key\":\"\",\"slot_id\":-1,\"prompt\":\"undefined: hello\"}";
+//        if (str2 == req.body){
+//            std::cout<<"true"<<std::endl;
+//        } else{
+//            std::cout<<"false"<<std::endl;
+//        }
         json data = json::parse(req.body);
 
         const int id_task = ctx_server.queue_tasks.get_new_id();
@@ -3256,109 +3285,21 @@ int main(int argc, char ** argv) {
      *     float* vecPtr = output_json['ggml_tensor_data'].data();
      *     ggml_tensor->data = (void*)(vecPtr);
      */
-//    const auto masternode_schedule = [&validate_api_key](const httplib::Request & req, httplib::Response & res){
-//        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
-//        if (!validate_api_key(req, res)) {
-//            return;
-//        }
-//        // store start layer index and end layer index and currently set up manually
-//        // TODO： need a model layer devided strategy
-//        std::vector<std::string> vec_worknode_ipaddress;
-//        vec_worknode_ipaddress.push_back("http://127.0.0.1:8081");
-//        vec_worknode_ipaddress.push_back("http://127.0.0.1:8082");
-//        std::vector<std::pair<int, int>> vec_worknode_layer_index;
-//        vec_worknode_layer_index.push_back(std::make_pair(0,31));
-//        vec_worknode_layer_index.push_back(std::make_pair(3,4));
-//
-//        json input_json;
-//        json output_json;
-//
-//        // worknode output content
-//        int token_id = 0;
-//        int slot_id = -1;
-//        bool stop = false;
-//        // ggml_tensor->data: std::vector<float> vector_data
-//
-//        // user requrest content
-//        std::string prompt = req.body;
-//        // worknode response content
-//        std::string response_str = "";
-//
-//
-//        const auto chunked_content_provider = [&](size_t, httplib::DataSink & sink){
-//            while (true) {
-//                //for (int i = 0; i < vec_worknode_layer_index.size(); i++) {
-//                for (int i = 0; i < 1; i++) {
-//                    if (i == 0) {
-//                        // initialize json data, and transform json to json string
-//                        std::vector<float> vector_data;
-//                        input_json = {
-//                                {"prompt",           prompt},
-//                                {"s_layer",          vec_worknode_layer_index[i].first},
-//                                {"e_layer",          vec_worknode_layer_index[i].second},
-//                                {"ggml_tensor_data", vector_data},
-//                                {"token_id",         token_id},
-//                                {"slot_id",          slot_id}
-//                        };
-//                        std::string input = input_json.dump();
-//
-//                        // send post request to worknode
-//                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
-//                        auto forwarded_res = cli.Post("/masternode_schedule", input, "application/json; charset=utf-8");
-//                        response_str = forwarded_res->body;
-//
-//
-//                    } else {
-//                        slot_id = output_json["slot_id"];
-//                        std::vector<float> vector_data = output_json["vector_data"];
-//                        input_json = {
-//                                {"prompt",           prompt},
-//                                {"s_layer",          vec_worknode_layer_index[i].first},
-//                                {"e_layer",          vec_worknode_layer_index[i].second},
-//                                {"ggml_tensor_data", vector_data},
-//                                {"token_id",         token_id},
-//                                {"slot_id",          slot_id}
-//                        };
-//                        std::string input = input_json.dump();
-//
-//                        httplib::Client cli(vec_worknode_ipaddress[i]); // worknode ip address and port
-//                        auto forwarded_res = cli.Post("/masternode_schedule", input, "application/json; charset=utf-8");
-//                        response_str = forwarded_res->body;
-//
-//                    }
-//                    output_json = json::parse(response_str);
-//
-//                }
-//                sink.write(response_str.c_str(), response_str.size());
-//                stop = output_json["stop"];
-//                token_id = output_json["token_id"];
-//                if (stop) {
-//                    break;
-//                }
-//            }
-//            sink.done();
-//            return true;
-//        };
-//        res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
-//
-//    };
 
     const auto handle_worknode_initialize = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
         }
-
-        json data_input = json::parse(req.body);
-        std::string stri = data_input["prompt"];
-        json data = json::parse(stri);
+        json data = json::parse(req.body);
 
         const int id_task = ctx_server.queue_tasks.get_new_id();
 
         ctx_server.queue_results.add_waiting_task_id(id_task);
+        ctx_server.task_id = id_task;
         ctx_server.request_completion(id_task, -1, data, false, false);
 
-        if (data_input["e_layer"] == 31){
+        if (data["e_layer"] == 31){
             if (!json_value(data, "stream", false)) {
                 server_task_result result = ctx_server.queue_results.recv(id_task);
                 if (!result.error && result.stop) {
@@ -3378,25 +3319,37 @@ int main(int argc, char ** argv) {
                         { "to_send", str }
                     });
 
-                    httplib::Client cli("http://127.0.0.1:8080");
-                    auto forwarded_res = cli.Post("/masternode_passing", str, "text/plain");
-                }
+                    std::vector<float> vector_data;//null
+                    json result_data;
+                    result_data["slot_id"] = result.data["id_slot"];
+                    int a = result.data["id_slot"];
+                    int b = result.data["token_id"];
+                    result_data["token_id"] = result.data["token_id"];
+                    result_data["ggml_tensor_data"] = vector_data;
+                    result_data["token"] = str;
+                    result_data["s_layer"] = 0;
+                    result_data["e_layer"] = 15;
+                    result_data["stop"] = result.stop;
+                    std::string input = result_data.dump();
 
+                    httplib::Client cli("http://127.0.0.1:8080");
+                    auto forwarded_res = cli.Post("/masternode_passing", input, "application/json");
+                }
                 res.set_content("passing success!","text/plain");
             }
         }else {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             std::vector<float> vector_data = result.ggml_tensor_data;
-            json input_json;
-            input_json = {
-                    {"prompt",           data_input["prompt"]},
-                    {"s_layer",          16},
-                    {"e_layer",          31},
-                    {"ggml_tensor_data", vector_data},
-                    {"token_id",         0},
-                    {"slot_id",          -1}
-            };
-            std::string input = input_json.dump();
+
+            json passing_data = json::parse(req.body);
+            passing_data["s_layer"] = 15;
+            passing_data["e_layer"] = 31;
+            passing_data["ggml_tensor_data"] = vector_data;
+            passing_data["token_id"] = 0;
+            passing_data["slot_id"] = -1;
+            passing_data["token"] = "";
+            passing_data["stop"] = result.stop;
+            std::string input = passing_data.dump();
 
             httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
             auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json; charset=utf-8");
@@ -3410,25 +3363,20 @@ int main(int argc, char ** argv) {
         if (!validate_api_key(req, res)) {
             return;
         }
-        json input_json;
         std::vector<float> vector_data;
-        input_json = {
-                {"prompt",           req.body},
-                {"s_layer",          0},
-                {"e_layer",          15},
-                {"ggml_tensor_data", vector_data},
-                {"token_id",         0},
-                {"slot_id",          -1},
-                {"token",     ""}
-        };
-        std::string input = input_json.dump();
+        json data = json::parse(req.body);
+        data["s_layer"] = 0;
+        data["e_layer"] = 15;
+        data["ggml_tensor_data"] = vector_data;
+        data["token_id"] = 0;
+        data["slot_id"] = -1;
+        data["token"] = "";
+
+        std::string input = data.dump();
 
         // pass post request.body to worknode 1, and add some new inforation into input
         httplib::Client cli("http://127.0.0.1:8081"); // worknode1 ip address and port
         auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
-
-//        httplib::Client cli("http://127.0.0.1:8081"); // worknode ip address and port
-//        auto forwarded_res = cli.Post("/worknode", req.body, "application/json");// only send the original prompt
 
         const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
             while (true) {
@@ -3445,6 +3393,9 @@ int main(int argc, char ** argv) {
                 if(str != "") {
                     sink.write(str.c_str(), str.size());
                 }
+                if(ctx_server.stop){
+                    break;
+                }
             }
             sink.done();
             return true;
@@ -3460,10 +3411,22 @@ int main(int argc, char ** argv) {
             return;
         }
         json data_input = json::parse(req.body);
+        ctx_server.stop = data_input["stop"];
         std::string token = data_input["token"];
         ctx_server.results_vector.push_back(token); //store result token
-        httplib::Client cli("http://127.0.0.1:8081");
-        auto forwarded_res = cli.Post("/worknode_notify", req.body, "application/json");
+        if(!data_input["stop"]) {
+            httplib::Client cli("http://127.0.0.1:8081");
+            auto forwarded_res = cli.Post("/worknode_notify", req.body, "application/json");
+        }else{
+            json input_json;
+            input_json = {
+                    {"e_layer",          15}
+
+            };
+            std::string input = input_json.dump();
+            httplib::Client cli("http://127.0.0.1:8081");
+            auto forwarded_res = cli.Post("/worknode_release_slot", input, "application/json; charset=utf-8");
+        }
 
         res.set_content("passing success!","text/plain");
     };
@@ -3473,22 +3436,23 @@ int main(int argc, char ** argv) {
         if (!validate_api_key(req, res)) {
             return;
         }
-
+        json data_input = json::parse(req.body);
+        int id_task = ctx_server.task_id;
         {
             LOG_VERBOSE("posting NEXT_RESPONSE", {});
 
             server_task task;
             task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
             task.id_target = -1;
+            // put new token id and correnspond id_slot
+            task.slot_id = 0;
+            task.token_id = data_input["token_id"];
+            std::vector<float> vector_data = data_input["ggml_tensor_data"];
+            task.ggml_tensor_data = vector_data; //vector_data.data();
 
             ctx_server.queue_tasks.post(task);
         }
 
-        json data_input = json::parse(req.body);
-        std::string stri = data_input["prompt"];
-        json data = json::parse(stri);
-
-        int id_task = 0;
         if (data_input["e_layer"] == 31) {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             if (!result.error) {
@@ -3500,42 +3464,79 @@ int main(int argc, char ** argv) {
                 LOG_VERBOSE("data stream", {
                     { "to_send", str }
                 });
+
+                std::vector<float> vector_data;//null
+
+                json result_data;
+
+                result_data["slot_id"] = result.data["id_slot"];
+                result_data["token_id"] = result.data["token_id"];
+                result_data["ggml_tensor_data"] = vector_data;
+                result_data["token"] = str;
+                result_data["s_layer"] = 0;
+                result_data["e_layer"] = 15;
+                result_data["stop"] = result.stop;
+                std::string input = result_data.dump();
                 httplib::Client cli("http://127.0.0.1:8080");
-                auto forwarded_res = cli.Post("/masternode_passing", str, "text/plain");
+                auto forwarded_res = cli.Post("/masternode_passing", input, "application/json; charset=utf-8");
             }
             res.set_content("start worknode success!", "text/plain");
         }else {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             std::vector<float> vector_data = result.ggml_tensor_data;
             json input_json;
+
             input_json = {
-                    {"prompt",           data_input["prompt"]},
-                    {"s_layer",          16},
-                    {"e_layer",          31},
                     {"ggml_tensor_data", vector_data},
-                    {"token_id",         0},
-                    {"slot_id",          -1},
-                    {"token",            ""}
+                    {"token_id",         data_input["token_id"]},
+                    {"slot_id",          data_input["slot_id"]},
+                    {"s_layer",          15},
+                    {"e_layer",          31},
+                    {"stop",             data_input["stop"]},
             };
+
             std::string input = input_json.dump();
 
             httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
-            auto forwarded_res = cli.Post("/handle_worknode_notify", input, "application/json; charset=utf-8");
+            auto forwarded_res = cli.Post("/worknode_notify", input, "application/json; charset=utf-8");
+        }
+    };
+
+    const auto handle_worknode_release_slot = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+        int id_task = ctx_server.task_id;
+
+        ctx_server.request_cancel(id_task);
+        ctx_server.queue_results.remove_waiting_task_id(id_task);
+        ctx_server.stop = false;
+        json data_input = json::parse(req.body);
+        if (data_input["e_layer"] != 31) {
+            json input_json;
+            input_json = {
+                    {"e_layer",          31}
+
+            };
+            std::string input = input_json.dump();
+            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            auto forwarded_res = cli.Post("/worknode_release_slot", input, "application/json; charset=utf-8");
         }
     };
 
     // worknode post processing functions
     svr.Post("/worknode_initialize",        handle_worknode_initialize);
     svr.Post("/worknode_notify",            handle_worknode_notify);
+    svr.Post("/worknode_release_slot",      handle_worknode_release_slot);
 
     // masternode post processing functions
     svr.Post("/masternode_passing",         handle_masternode_passing);
     // if you want to start llama cpp by multiple node
-
-    //svr.Post("/completion",          handle_completions);
+    svr.Post("/completion",                 handle_completions);
 
     // if you want to start llama cpp by single node
-    svr.Post("/completion", completions);
+    //svr.Post("/completion", completions);
 
     svr.Get("/v1/models", [&params, &model_meta](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));

@@ -383,6 +383,7 @@ extern "C" {
     LLAMA_API void llama_set_s_e_inference(struct llama_context * ctx, int s_layer, int e_layer, struct ggml_tensor* trans_tensor, float* ggml_tensor_data);
     struct ggml_tensor* get_transfer_feature(struct llama_context* ctx);
     int64_t get_transfer_nlayer(struct llama_context* ctx);
+    LLAMA_API void llama_set_return_res(struct llama_context* ctx);
 
     LLAMA_API enum llama_vocab_type llama_vocab_type(const struct llama_model * model);
     LLAMA_API enum llama_rope_type  llama_rope_type (const struct llama_model * model);

@@ -2049,6 +2049,7 @@ struct llama_context {
     int e_layer=-1;
     struct ggml_tensor* trans_tensor;
     float* ggml_tensor_data;
+    bool return_res = true;
 
     int64_t t_start_us;
     int64_t t_load_us;
@@ -8748,7 +8749,7 @@ static void demo_pre(
         ggml_cgraph * gf,
         int  n_layers){
 
-    int s_layer = lctx.s_layer, e_layer = n_layers - 1; //lctx.e_layer;  NEED TO CHANGE!!!
+    int s_layer = lctx.s_layer, e_layer = lctx.e_layer;
     
     struct ggml_tensor* inp_tokens = ggml_graph_get_tensor(gf, "inp_tokens (view)");
     if (inp_tokens == NULL) {
@@ -8784,12 +8785,12 @@ static void demo_pre(
         if (s_layer == 0)
             snprintf(name_l0, sizeof(name_l0), "inp_tokens (view)");
         else
-            snprintf(name_l0, sizeof(name_l0), "l_out-%d", il0-1);  // start from l_out-[i10-1] (output of last layer)
+            snprintf(name_l0, sizeof(name_l0), "l_out-%d", il0);  // start from l_out-[i10-1] (output of last layer)
         snprintf(name_l1, sizeof(name_l1), "l_out-%d", il1);
 
         const int idx_l0 = ggml_graph_get_node_idx_jinyu(gf, name_l0);
         const int idx_l1 = e_layer != n_layers-1 ? ggml_graph_get_node_idx_jinyu(gf, name_l1) + 1 : gf->n_nodes;
-        //fprintf(stdout, "%s, %s, %d, %d\n", name_l0, name_l1, idx_l0, idx_l1);
+        fprintf(stdout, "%s, %s, %d, %d\n", name_l0, name_l1, idx_l0, idx_l1);
         
         if (idx_l0 < 0 || idx_l1 < 0) {
             fprintf(stderr, "%s: layer input nodes not found\n", __func__);
@@ -8813,7 +8814,8 @@ static void demo_pre(
             gf->nodes[0] = inp0; // jinyu: first node: input feature
             for (int i = 1; i < idx_l1 - idx_l0; i++) {
                 gf->nodes[i] = gf->nodes[idx_l0 + i];
-                gf->grads[i] = gf->grads[idx_l0 + i];
+                //linjian: delete attributes not found
+                //gf->grads[i] = gf->grads[idx_l0 + i];
             }
         }
 
@@ -9045,7 +9047,8 @@ static int llama_decode_internal(
                 GGML_ASSERT(strcmp(embd->name, "result_norm") == 0);
             }
         } else {
-            GGML_ASSERT(false && "missing result_output tensor");
+            if(lctx.return_res)
+                GGML_ASSERT(false && "missing result_output tensor");
         }
     }
     //---jinyu: end.
@@ -9086,7 +9089,7 @@ static int llama_decode_internal(
     // extract logits
     // TODO: do not compute and extract logits if only embeddings are needed
     //       need to update the graphs to skip "result_output"
-    if (res) {
+    if (res && lctx.return_res) {
         auto & logits_out = lctx.logits;
 
 #ifndef NDEBUG
@@ -13226,6 +13229,9 @@ void llama_set_s_e_inference(struct llama_context * ctx, int s_layer, int e_laye
     ctx->e_layer = e_layer;
     ctx->trans_tensor = trans_tensor;
     ctx->ggml_tensor_data = ggml_tensor_data;
+}
+void llama_set_return_res(struct llama_context* ctx) {
+    ctx->return_res = false;
 }
 struct ggml_tensor* get_transfer_feature(struct llama_context* ctx) {
     return ctx->trans_tensor;
