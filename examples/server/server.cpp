@@ -132,6 +132,8 @@ struct server_params {
 
     bool slots_endpoint   = true;
     bool metrics_endpoint = false;
+
+    std::unordered_map<std::string, std::string> host_info;
 };
 
 struct server_slot {
@@ -670,6 +672,8 @@ struct server_context {
     std::vector<std::string> results_vector;
     bool stop = false;
     int task_id = -1;
+
+    std::unordered_map<std::string, std::string> host_list;
 
     ~server_context() {
         if (ctx) {
@@ -1531,9 +1535,11 @@ struct server_context {
                 } break;
             case SERVER_TASK_TYPE_NEXT_RESPONSE:
                 {
-                    server_slot * slot = get_corresponding_slot(task.slot_id);
-                    slot->sampled = task.token_id;
-                    slot->ggml_tensor_data = task.ggml_tensor_data;
+                    if (host_list.size() > 1) {
+                        server_slot * slot = get_corresponding_slot(task.slot_id);
+                        slot->sampled = task.token_id;
+                        slot->ggml_tensor_data = task.ggml_tensor_data;
+                    }
                 } break;
             case SERVER_TASK_TYPE_METRICS:
                 {
@@ -1684,17 +1690,19 @@ struct server_context {
                 return true;
             }
         }
-        // if there are multiple node, then we need comment the following code block
-//        if(e_layer-s_layer+1==n_layer)
-//        {
-//            LOG_VERBOSE("posting NEXT_RESPONSE", {});
-//
-//            server_task task;
-//            task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
-//            task.id_target = -1;
-//
-//            queue_tasks.post(task);
-//        }
+
+        if (host_list.size() == 1) {
+            if(e_layer-s_layer+1==n_layer)
+            {
+                LOG_VERBOSE("posting NEXT_RESPONSE", {});
+
+                server_task task;
+                task.type      = SERVER_TASK_TYPE_NEXT_RESPONSE;
+                task.id_target = -1;
+
+                queue_tasks.post(task);
+            }
+        }
 
         // apply context-shift if needed
         // TODO: simplify and improve
@@ -2767,6 +2775,25 @@ static void server_params_parse(int argc, char ** argv, server_params & sparams,
                 break;
             }
             params.kv_overrides.push_back(kvo);
+        } else if (arg == "--hostfile") {
+            if (++i >= argc) {
+                invalid_param = true;
+                break;
+            }
+            std::ifstream host_file(argv[i]);
+            if (!host_file) {
+                fprintf(stderr, "error: failed to open file '%s'\n", argv[i]);
+                invalid_param = true;
+                break;
+            }
+            std::string hostinfo;
+            while (std::getline(host_file, hostinfo)) {
+                if (!hostinfo.empty() && hostinfo[0] != '#') {
+                    int found = hostinfo.find(' ');
+                    sparams.host_info[hostinfo.substr(0, found)] = hostinfo.substr(found + 1);
+                }
+            }
+            host_file.close();
         } else {
             fprintf(stderr, "error: unknown argument: %s\n", arg.c_str());
             server_print_usage(argv[0], default_params, default_sparams);
@@ -3105,6 +3132,7 @@ int main(int argc, char ** argv) {
         return 1;
     } else {
         ctx_server.initialize();
+        ctx_server.host_list = sparams.host_info;
         state.store(SERVER_STATE_READY);
     }
 
@@ -3286,7 +3314,7 @@ int main(int argc, char ** argv) {
      *     ggml_tensor->data = (void*)(vecPtr);
      */
 
-    const auto handle_worknode_initialize = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_worknode_initialize = [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
@@ -3332,7 +3360,7 @@ int main(int argc, char ** argv) {
                     result_data["stop"] = result.stop;
                     std::string input = result_data.dump();
 
-                    httplib::Client cli("http://127.0.0.1:8080");
+                    httplib::Client cli(sparams.host_info["master"]);
                     auto forwarded_res = cli.Post("/masternode_passing", input, "application/json");
                 }
                 res.set_content("passing success!","text/plain");
@@ -3351,14 +3379,14 @@ int main(int argc, char ** argv) {
             passing_data["stop"] = result.stop;
             std::string input = passing_data.dump();
 
-            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            httplib::Client cli(sparams.host_info["worker2"]); // worknode ip address and port
             auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json; charset=utf-8");
         }
 
     };
 
     // linjian : add masternode schedule
-    const auto handle_completions = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_completions = [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
@@ -3375,7 +3403,7 @@ int main(int argc, char ** argv) {
         std::string input = data.dump();
 
         // pass post request.body to worknode 1, and add some new inforation into input
-        httplib::Client cli("http://127.0.0.1:8081"); // worknode1 ip address and port
+        httplib::Client cli(sparams.host_info["worker1"]); // worknode1 ip address and port
         auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
 
         const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
@@ -3405,7 +3433,7 @@ int main(int argc, char ** argv) {
 
 
     // receive the token of final worknode, the store result to masternode outputstream and pass new content to first worknode
-    const auto handle_masternode_passing= [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_masternode_passing= [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
@@ -3415,7 +3443,7 @@ int main(int argc, char ** argv) {
         std::string token = data_input["token"];
         ctx_server.results_vector.push_back(token); //store result token
         if(!data_input["stop"]) {
-            httplib::Client cli("http://127.0.0.1:8081");
+            httplib::Client cli(sparams.host_info["worker1"]);
             auto forwarded_res = cli.Post("/worknode_notify", req.body, "application/json");
         }else{
             json input_json;
@@ -3424,14 +3452,14 @@ int main(int argc, char ** argv) {
 
             };
             std::string input = input_json.dump();
-            httplib::Client cli("http://127.0.0.1:8081");
+            httplib::Client cli(sparams.host_info["worker1"]);
             auto forwarded_res = cli.Post("/worknode_release_slot", input, "application/json; charset=utf-8");
         }
 
         res.set_content("passing success!","text/plain");
     };
 
-    const auto handle_worknode_notify= [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_worknode_notify= [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
@@ -3477,7 +3505,7 @@ int main(int argc, char ** argv) {
                 result_data["e_layer"] = 15;
                 result_data["stop"] = result.stop;
                 std::string input = result_data.dump();
-                httplib::Client cli("http://127.0.0.1:8080");
+                httplib::Client cli(sparams.host_info["master"]);
                 auto forwarded_res = cli.Post("/masternode_passing", input, "application/json; charset=utf-8");
             }
             res.set_content("start worknode success!", "text/plain");
@@ -3497,12 +3525,12 @@ int main(int argc, char ** argv) {
 
             std::string input = input_json.dump();
 
-            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            httplib::Client cli(sparams.host_info["worker2"]); // worknode ip address and port
             auto forwarded_res = cli.Post("/worknode_notify", input, "application/json; charset=utf-8");
         }
     };
 
-    const auto handle_worknode_release_slot = [&ctx_server, &validate_api_key](const httplib::Request & req, httplib::Response & res) {
+    const auto handle_worknode_release_slot = [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
         if (!validate_api_key(req, res)) {
             return;
@@ -3520,23 +3548,24 @@ int main(int argc, char ** argv) {
 
             };
             std::string input = input_json.dump();
-            httplib::Client cli("http://127.0.0.1:8082"); // worknode ip address and port
+            httplib::Client cli(sparams.host_info["worker2"]); // worknode ip address and port
             auto forwarded_res = cli.Post("/worknode_release_slot", input, "application/json; charset=utf-8");
         }
     };
 
-    // worknode post processing functions
-    svr.Post("/worknode_initialize",        handle_worknode_initialize);
-    svr.Post("/worknode_notify",            handle_worknode_notify);
-    svr.Post("/worknode_release_slot",      handle_worknode_release_slot);
-
-    // masternode post processing functions
-    svr.Post("/masternode_passing",         handle_masternode_passing);
     // if you want to start llama cpp by multiple node
-    svr.Post("/completion",                 handle_completions);
-
-    // if you want to start llama cpp by single node
-    //svr.Post("/completion", completions);
+    if (sparams.host_info.size() > 1) {
+        svr.Post("/completion",             handle_completions);
+        // worknode post-processing functions
+        svr.Post("/worknode_initialize",        handle_worknode_initialize);
+        svr.Post("/worknode_notify",            handle_worknode_notify);
+        svr.Post("/worknode_release_slot",      handle_worknode_release_slot);
+        // masternode post-processing functions
+        svr.Post("/masternode_passing",         handle_masternode_passing);
+    } else {
+        // if you want to start llama cpp by single node
+        svr.Post("/completion",             completions);
+    }
 
     svr.Get("/v1/models", [&params, &model_meta](const httplib::Request & req, httplib::Response & res) {
         res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
