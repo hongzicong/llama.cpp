@@ -94,6 +94,7 @@ struct server_task_result {
 
     //linjian
     std::vector<float> ggml_tensor_data;
+    bool incomplete = false;
 };
 
 struct server_task_multi {
@@ -1161,6 +1162,19 @@ struct server_context {
 
         if (incomplete) {
             slot.has_next_token = true;
+            server_task_result res;
+            res.id       = slot.id_task;
+            res.id_multi = slot.id_multi;
+            res.error    = false;
+            res.stop     = false;
+            res.incomplete = false;
+            res.data     = json {
+                    {"stop",       false},
+                    {"id_slot",    slot.id},
+                    {"multimodal", false},
+                    {"token_id",    slot.sampled}
+            };
+            queue_results.send(res);
         }
 
         // check the limits
@@ -1262,6 +1276,7 @@ struct server_context {
         res.id_multi = slot.id_multi;
         res.error    = false;
         res.stop     = false;
+        res.incomplete = false;
         res.data     = json {
             {"content",    tkn.text_to_send},
             {"stop",       false},
@@ -1395,6 +1410,7 @@ struct server_context {
         std::vector<float> ve (data, data + ggml_nelements(slot.trans_tensor));
         res.ggml_tensor_data = ve;
         //res.ggml_tensor_data = (float *)(slot.trans_tensor->data);
+        res.incomplete = false;
         queue_results.send(res);
     }
 
@@ -3358,6 +3374,7 @@ int main(int argc, char ** argv) {
                     result_data["s_layer"] = 0;
                     result_data["e_layer"] = 15;
                     result_data["stop"] = result.stop;
+                    result_data["incomplete"] = result.incomplete;
                     std::string input = result_data.dump();
 
                     httplib::Client cli(sparams.host_info["master"]);
@@ -3376,7 +3393,7 @@ int main(int argc, char ** argv) {
             passing_data["token_id"] = 0;
             passing_data["slot_id"] = -1;
             passing_data["token"] = "";
-            passing_data["stop"] = result.stop;
+            //passing_data["stop"] = result.stop;
             std::string input = passing_data.dump();
 
             httplib::Client cli(sparams.host_info["worker2"]); // worknode ip address and port
@@ -3439,9 +3456,11 @@ int main(int argc, char ** argv) {
             return;
         }
         json data_input = json::parse(req.body);
-        ctx_server.stop = data_input["stop"];
-        std::string token = data_input["token"];
-        ctx_server.results_vector.push_back(token); //store result token
+        if (!data_input["incomplete"]) {
+            ctx_server.stop = data_input["stop"];
+            std::string token = data_input["token"];
+            ctx_server.results_vector.push_back(token); //store result token
+        }
         if(!data_input["stop"]) {
             httplib::Client cli(sparams.host_info["worker1"]);
             auto forwarded_res = cli.Post("/worknode_notify", req.body, "application/json");
@@ -3504,6 +3523,7 @@ int main(int argc, char ** argv) {
                 result_data["s_layer"] = 0;
                 result_data["e_layer"] = 15;
                 result_data["stop"] = result.stop;
+                result_data["incomplete"] = result.incomplete;
                 std::string input = result_data.dump();
                 httplib::Client cli(sparams.host_info["master"]);
                 auto forwarded_res = cli.Post("/masternode_passing", input, "application/json; charset=utf-8");
