@@ -95,6 +95,7 @@ struct server_task_result {
     //linjian
     std::vector<float> ggml_tensor_data;
     bool incomplete = false;
+    //int task_id   = -1;
 };
 
 struct server_task_multi {
@@ -584,7 +585,7 @@ struct server_response {
     // when the request is finished, we can remove task associated with it
     void remove_waiting_task_id(int id_task) {
         LOG_VERBOSE("remove waiting for task id", {{"id_task", id_task}});
-
+        std::cout<<"[Dec] remove_waiting_task_id: "<<id_task<<std::endl;
         std::unique_lock<std::mutex> lock(mutex_results);
         waiting_task_ids.erase(id_task);
     }
@@ -598,6 +599,7 @@ struct server_response {
             });
 
             for (int i = 0; i < (int) queue_results.size(); i++) {
+                std::cout<<"[Dec] queue_results[i].id"<< queue_results[i].id<<" and id task:"<< id_task<<std::endl;
                 if (queue_results[i].id == id_task) {
                     assert(queue_results[i].id_multi == -1);
                     server_task_result res = queue_results[i];
@@ -618,7 +620,7 @@ struct server_response {
     // Send a new result to a waiting id_task
     void send(server_task_result result) {
         LOG_VERBOSE("send new result", {{"id_task", result.id}});
-
+        std::cout<<"[Dec] send: result.id: "<< result.id<<std::endl;
         std::unique_lock<std::mutex> lock(mutex_results);
         for (const auto & id_task : waiting_task_ids) {
             // LOG_TEE("waiting task id %i \n", id_task);
@@ -628,7 +630,7 @@ struct server_response {
                 callback_update_multitask(id_task, result.id, result);
                 continue;
             }
-
+            std::cout<<"[Dec] send: result.id"<< result.id<< " id_task "<<id_task<< std::endl;
             if (result.id == id_task) {
                 LOG_VERBOSE("queue_results.push_back", {{"id_task", id_task}});
                 queue_results.push_back(result);
@@ -1380,7 +1382,7 @@ struct server_context {
             if (embd == NULL) {
                 LOG_ERROR("failed to get embeddings", {
                     {"token",  batch.token [i]},
-                        {"seq_id", batch.seq_id[i][0]}
+                    {"seq_id", batch.seq_id[i][0]}
                 });
 
                 res.data = json {
@@ -3354,14 +3356,14 @@ int main(int argc, char ** argv) {
             } else {
                 server_task_result result = ctx_server.queue_results.recv(id_task);
                 if (!result.error) {
-                    const std::string str =
-                            "data: " +
-                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                            "\n\n";
-
-                    LOG_VERBOSE("data stream", {
-                        { "to_send", str }
-                    });
+//                    const std::string str =
+//                            "data: " +
+//                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+//                            "\n\n";
+//
+//                    LOG_VERBOSE("data stream", {
+//                        { "to_send", str }
+//                    });
 
                     std::vector<float> vector_data;//null
                     json result_data;
@@ -3370,7 +3372,7 @@ int main(int argc, char ** argv) {
                     int b = result.data["token_id"];
                     result_data["token_id"] = result.data["token_id"];
                     result_data["ggml_tensor_data"] = vector_data;
-                    result_data["token"] = str;
+                    result_data["data"] = result.data;
                     result_data["s_layer"] = 0;
                     result_data["e_layer"] = 15;
                     result_data["stop"] = result.stop;
@@ -3422,29 +3424,79 @@ int main(int argc, char ** argv) {
         // pass post request.body to worknode 1, and add some new inforation into input
         httplib::Client cli(sparams.host_info["worker1"]); // worknode1 ip address and port
         auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
-
-        const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
+        //...
+        int id_task = 0;
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+        const auto chunked_content_provider = [id_task, &ctx_server](size_t, httplib::DataSink & sink) {
             while (true) {
-                std::string str = "";
-                //blocking until receive new result
-                while(true) {
-                    if(!ctx_server.results_vector.empty()) {
-                        str = ctx_server.results_vector[0];
-                        ctx_server.results_vector.erase(ctx_server.results_vector.begin());
-                        std::cout<<int(ctx_server.results_vector.size());
+                server_task_result result = ctx_server.queue_results.recv(id_task);
+                if (!result.error) {
+
+                    const std::string str =
+                            "data: " +
+                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                            "\n\n";
+
+                    LOG_VERBOSE("data stream", {
+                        { "to_send", str }
+                    });
+                    std::cout<<"[Dec] handle completion: "<<str<<std::endl;
+                    if (!sink.write(str.c_str(), str.size())) {
+                        ctx_server.queue_results.remove_waiting_task_id(id_task);
+                        return false;
+                    }
+
+                    if (result.stop) {
                         break;
                     }
-                }
-                if(str != "") {
-                    sink.write(str.c_str(), str.size());
-                }
-                if(ctx_server.stop){
+                } else {
+                    const std::string str =
+                            "error: " +
+                            result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                            "\n\n";
+
+                    LOG_VERBOSE("data stream", {
+                        { "to_send", str }
+                    });
+
+                    if (!sink.write(str.c_str(), str.size())) {
+                        ctx_server.queue_results.remove_waiting_task_id(id_task);
+                        return false;
+                    }
+
                     break;
                 }
             }
+
+            ctx_server.queue_results.remove_waiting_task_id(id_task);
             sink.done();
+
             return true;
         };
+
+
+//        const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
+//            while (true) {
+//                std::string str = "";
+//                //blocking until receive new result
+//                while(true) {
+//                    if(!ctx_server.results_vector.empty()) {
+//                        str = ctx_server.results_vector[0];
+//                        ctx_server.results_vector.erase(ctx_server.results_vector.begin());
+//                        std::cout<<int(ctx_server.results_vector.size());
+//                        break;
+//                    }
+//                }
+//                if(str != "") {
+//                    sink.write(str.c_str(), str.size());
+//                }
+//                if(ctx_server.stop){
+//                    break;
+//                }
+//            }
+//            sink.done();
+//            return true;
+//        };
         res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
     };
 
@@ -3457,9 +3509,21 @@ int main(int argc, char ** argv) {
         }
         json data_input = json::parse(req.body);
         if (!data_input["incomplete"]) {
-            ctx_server.stop = data_input["stop"];
-            std::string token = data_input["token"];
-            ctx_server.results_vector.push_back(token); //store result token
+            server_task_result result;
+            result.stop = data_input["stop"];
+            result.data = data_input["data"];
+            result.error = false;
+            result.id = 0;
+
+            const std::string str =
+                    "data: " +
+                    result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                    "\n\n";
+            std::cout<<"[Dec] function: handle_masternode_passing: result.data:"<< str << std::endl;
+            //ctx_server.stop = data_input["stop"];
+            //std::string token = data_input["token"];
+            //ctx_server.results_vector.push_back(token); //store result token
+            ctx_server.queue_results.send(result);
         }
         if(!data_input["stop"]) {
             httplib::Client cli(sparams.host_info["worker1"]);
@@ -3503,14 +3567,14 @@ int main(int argc, char ** argv) {
         if (data_input["e_layer"] == 31) {
             server_task_result result = ctx_server.queue_results.recv(id_task);
             if (!result.error) {
-                const std::string str =
-                        "data: " +
-                        result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
-                        "\n\n";
-
-                LOG_VERBOSE("data stream", {
-                    { "to_send", str }
-                });
+//                const std::string str =
+//                        "data: " +
+//                        result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+//                        "\n\n";
+//
+//                LOG_VERBOSE("data stream", {
+//                    { "to_send", str }
+//                });
 
                 std::vector<float> vector_data;//null
 
@@ -3519,7 +3583,7 @@ int main(int argc, char ** argv) {
                 result_data["slot_id"] = result.data["id_slot"];
                 result_data["token_id"] = result.data["token_id"];
                 result_data["ggml_tensor_data"] = vector_data;
-                result_data["token"] = str;
+                result_data["data"] = result.data;
                 result_data["s_layer"] = 0;
                 result_data["e_layer"] = 15;
                 result_data["stop"] = result.stop;
