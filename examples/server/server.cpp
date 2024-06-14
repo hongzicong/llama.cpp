@@ -676,6 +676,8 @@ struct server_context {
     bool stop = false;
     int task_id = -1;
 
+    std::string whisper_host;
+
     std::unordered_map<std::string, std::string> host_list;
 
     ~server_context() {
@@ -3420,7 +3422,6 @@ int main(int argc, char ** argv) {
         data["token"] = "";
 
         std::string input = data.dump();
-
         // pass post request.body to worknode 1, and add some new inforation into input
         httplib::Client cli(sparams.host_info["worker1"]); // worknode1 ip address and port
         auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
@@ -3474,8 +3475,7 @@ int main(int argc, char ** argv) {
             return true;
         };
 
-
-//        const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
+        //        const auto chunked_content_provider = [&ctx_server](size_t, httplib::DataSink & sink) {
 //            while (true) {
 //                std::string str = "";
 //                //blocking until receive new result
@@ -3499,6 +3499,62 @@ int main(int argc, char ** argv) {
 //        };
         res.set_chunked_content_provider("text/event-stream", chunked_content_provider);
     };
+
+    const auto handle_whisper_completions = [&ctx_server, &validate_api_key, &sparams](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Access-Control-Allow-Origin", req.get_header_value("Origin"));
+        if (!validate_api_key(req, res)) {
+            return;
+        }
+        std::vector<float> vector_data;
+        json data = json::parse(req.body);
+        std::cout<<"[input] "<<req.body<<std::endl;
+        data["s_layer"] = 0;
+        data["e_layer"] = 15;
+        data["ggml_tensor_data"] = vector_data;
+        data["token_id"] = 0;
+        data["slot_id"] = -1;
+        data["token"] = "";
+        //ctx_server.whisper_host ='127.0.0.1:8090';
+        ctx_server.whisper_host = data["whisper_host"];
+        std::string input = data.dump();
+        // pass post request.body to worknode 1, and add some new inforation into input
+        httplib::Client cli(sparams.host_info["worker1"]); // worknode1 ip address and port
+        auto forwarded_res = cli.Post("/worknode_initialize", input, "application/json");
+        //...
+        int id_task = 0;
+        ctx_server.queue_results.add_waiting_task_id(id_task);
+
+
+
+        httplib::Client client(ctx_server.whisper_host);
+        while (true) {
+            server_task_result result = ctx_server.queue_results.recv(id_task);
+            if (!result.error) {
+                const std::string str =
+                        "data: " +
+                        result.data.dump(-1, ' ', false, json::error_handler_t::replace) +
+                        "\n\n";
+
+                LOG_VERBOSE("data stream", {
+                    { "to_send", str }
+                });
+                std::cout << "[Dec] handle completion: " << str << std::endl;
+                std::string out_token = result.data.dump(-1, ' ', false, json::error_handler_t::replace);
+                auto forwarded_res = client.Post("/handle_send_token", out_token, "application/json");
+
+                if (result.stop) {
+                    break;
+                }
+            }
+
+        }
+
+        ctx_server.queue_results.remove_waiting_task_id(id_task);
+
+
+    };
+
+
 
 
     // receive the token of final worknode, the store result to masternode outputstream and pass new content to first worknode
@@ -3646,6 +3702,8 @@ int main(int argc, char ** argv) {
         svr.Post("/worknode_release_slot",      handle_worknode_release_slot);
         // masternode post-processing functions
         svr.Post("/masternode_passing",         handle_masternode_passing);
+        // whisper server
+        svr.Post("/whisper_completion",             handle_whisper_completions);
     } else {
         // if you want to start llama cpp by single node
         svr.Post("/completion",             completions);
